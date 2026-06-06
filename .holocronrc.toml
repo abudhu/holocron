@@ -1,3 +1,28 @@
+# cargo-geiger is currently broken in the OneDev CI environment:
+# every per-member invocation fails with
+#   Failed to match (ignoring source) package:
+#     registry+https://github.com/rust-lang/crates.io-index#valuable@0.1.1
+# (and similar for anstyle, etc.) regardless of whether cargo fetch
+# pre-populates the registry. Suspected cargo-geiger upstream bug —
+# its vendored `cargo` crate version (0.86) is behind the `cargo`
+# binary on rust:1.84-bookworm and package matching breaks.
+#
+# Local dogfood runs (rust 1.93 on macOS) work fine. The skip is
+# CI-specific. When cargo-geiger upstream catches up (see open issues
+# #558, #559 at github.com/rust-secure-code/cargo-geiger), drop this
+# line and the Security category goes back to A- (54 unsafe-use findings)
+# instead of A+ (cargo-audit only, 0 advisory findings).
+#
+# Pre-#38 this was silently a no-op (geiger failed but returned Ok([])
+# so the grader thought Security was clean). #38 made geiger honest;
+# this rc line is the project-side acknowledgement that the honest
+# answer in CI is "we measure with cargo-audit only here."
+#
+# Follow-up #40 will add a --disable-auditor flag so CI can override
+# the rc without forcing local users to commented-out lines.
+[auditors]
+cargo-geiger = false
+
 [[allowlist]]
 auditor = "rust-code-analysis"
 code = "complexity-warn"
