@@ -1,0 +1,30 @@
+[package]
+name = "holocron-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core types and orchestration for the Holocron Rust auditor"
+repository.workspace = true
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+missing_errors_doc = "allow"  # too noisy at v0.1
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true

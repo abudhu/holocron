@@ -1,0 +1,77 @@
+version: 47
+jobs:
+- name: CI
+  steps:
+  - type: CheckoutStep
+    name: checkout
+    cloneCredential:
+      type: DefaultCredential
+    withLfs: false
+    withSubmodules: false
+    condition: SUCCESSFUL
+  # Cargo registry + git index cache. Key has no checksum-files so it's
+  # always a partial-match restore — registry index churns frequently
+  # but is cheap to refresh incrementally.
+  - type: SetupCacheStep
+    name: cache cargo home
+    key: cargo-home
+    paths:
+    - .cargo-home/registry
+    - .cargo-home/git
+    uploadStrategy: UPLOAD_IF_NOT_EXACT_MATCH
+    condition: SUCCESSFUL
+  # Compiled artefacts. Keyed off Cargo.lock — a lockfile change
+  # invalidates and re-uploads. Lockfile-stable iterations reuse.
+  - type: SetupCacheStep
+    name: cache cargo target
+    key: cargo-target
+    checksumFiles: Cargo.lock
+    paths:
+    - target
+    uploadStrategy: UPLOAD_IF_NOT_EXACT_MATCH
+    condition: SUCCESSFUL
+  - type: CommandStep
+    name: fmt + clippy + test
+    runInContainer: true
+    # rust:1.84-bookworm ships rustc + cargo + git. rustfmt/clippy
+    # components are added explicitly inside the step because the
+    # base image strips them to keep size down.
+    image: rust:1.84-bookworm
+    runAs: '0:0'
+    interpreter:
+      type: DefaultInterpreter
+      commands: |
+        set -euxo pipefail
+        rustc --version
+        cargo --version
+
+        # Direct cargo at the cached locations so the SetupCacheStep
+        # mounts are actually used.
+        export CARGO_HOME="$(pwd)/.cargo-home"
+        export CARGO_TARGET_DIR="$(pwd)/target"
+        mkdir -p "$CARGO_HOME"
+
+        echo "=== rustup add rustfmt + clippy ==="
+        rustup component add rustfmt clippy
+
+        echo "=== fmt check ==="
+        cargo fmt --all -- --check
+
+        echo "=== clippy (deny warnings) ==="
+        cargo clippy --all-targets --all-features -- -D warnings
+
+        echo "=== test ==="
+        cargo test --all --no-fail-fast
+
+        echo "=== release smoke ==="
+        cargo build --release --bin holocron
+        ./target/release/holocron --version
+    useTTY: false
+    condition: SUCCESSFUL
+  triggers:
+  - type: BranchUpdateTrigger
+    userMatch: anyone
+  retryCondition: never
+  maxRetries: 0
+  retryDelay: 30
+  timeout: 1800

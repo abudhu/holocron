@@ -1,0 +1,9 @@
+# Holocron dogfoods strict lints on itself.
+# Project-wide clippy config; per-crate lints are declared via `#![warn(...)]`.
+
+# Reject TODO/FIXME comments in committed code via the disallowed-words lint when on nightly.
+# (Stable doesn't enforce this; we rely on CI's `clippy::pedantic` flag in #2.)
+
+cognitive-complexity-threshold = 20
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250

@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+.zed/
+
+# macOS
+.DS_Store
+
+# Hermes / agent scratch
+/.hermes/
+/.claude/
+/.cursor/
+
+# Holocron's own scratch — when holocron runs itself, reports go to /tmp by default
+# but if anyone redirects them in-tree, keep them out
+holocron-report-*.md
+holocron-report-*.json
+
+# Direnv
+.envrc.local
