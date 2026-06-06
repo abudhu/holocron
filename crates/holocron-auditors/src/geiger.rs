@@ -188,12 +188,17 @@ fn report_to_findings(
         }
         let name = &entry.package.id.name;
         let version = &entry.package.id.version;
+        // Severity ladder — geiger findings are extremely chatty in any
+        // non-trivial dep tree (libc, mio, parking_lot all carry unsafe
+        // by necessity). We surface real signal only for local + direct;
+        // transitive unsafe is Info (no grade penalty) but still appears
+        // in the report so reviewers can audit the surface if they want.
         let severity = if local_ids.contains(name) {
             Severity::High
         } else if direct_ids.contains(name) {
-            Severity::Medium
-        } else {
             Severity::Low
+        } else {
+            Severity::Info
         };
         let total_unsafe = used.total_unsafe();
         let breakdown = format!(
@@ -390,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_dep_with_unsafe_is_medium() {
+    fn direct_dep_with_unsafe_is_low() {
         let json = r#"{
             "packages": [{
                 "package": {
@@ -407,11 +412,11 @@ mod tests {
         let report: SafetyReport = serde_json::from_str(json).unwrap();
         let findings = report_to_findings(&report, &local(), &direct());
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Medium);
+        assert_eq!(findings[0].severity, Severity::Low, "direct dep is Low (rare-but-real)");
     }
 
     #[test]
-    fn transitive_dep_with_unsafe_is_low() {
+    fn transitive_dep_with_unsafe_is_info() {
         let json = r#"{
             "packages": [{
                 "package": {
@@ -428,7 +433,11 @@ mod tests {
         let report: SafetyReport = serde_json::from_str(json).unwrap();
         let findings = report_to_findings(&report, &local(), &direct());
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].severity, Severity::Low, "transitive should be Low");
+        assert_eq!(
+            findings[0].severity,
+            Severity::Info,
+            "transitive is Info (advisory; no grade penalty for std-adjacent unsafe)"
+        );
     }
 
     #[test]
