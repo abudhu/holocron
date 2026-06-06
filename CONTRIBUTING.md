@@ -8,7 +8,7 @@ waste each other's time.
 
 ```bash
 # Clone
-git clone https://onedev.amitbudhu.com/holocron
+git clone https://github.com/abudhu/holocron
 cd holocron
 
 # Install Holocron + its eight auditor binaries (fast path via binstall)
@@ -34,7 +34,7 @@ A− or better, your branch is ready for review.
 ## Workflow
 
 1. **File an issue first** (or pick an existing one) on
-   <https://onedev.amitbudhu.com/holocron/~issues>. Drive-by feature PRs
+   <https://github.com/abudhu/holocron/issues>. Drive-by feature PRs
    without a discussion get closed.
 2. **Branch off `main`**. Name it `feat/<short-desc>` or `fix/<short-desc>`.
 3. **Test-first when fixing bugs.** A failing test that reproduces the
@@ -85,7 +85,7 @@ git config --global tag.gpgsign true
 
 # Optional: tell git which SSH keys count as trusted signers
 # (Required for `git log --show-signature` to verify locally; not
-# required for the signature to show up green on GitHub/OneDev.)
+# required for the signature to show up green on GitHub.)
 echo "your-email@example.com $(cat ~/.ssh/id_ed25519.pub)" \
   >> ~/.config/git/allowed_signers
 git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
@@ -115,7 +115,7 @@ be asked to re-sign and force-push or to reset and recommit.
 ## Reporting bugs / security issues
 
 - **General bugs:** file an issue on
-  <https://onedev.amitbudhu.com/holocron/~issues>.
+  <https://github.com/abudhu/holocron/issues>.
 - **Security vulnerabilities:** see [SECURITY.md](./SECURITY.md). Do
   NOT open a public issue for security problems.
 

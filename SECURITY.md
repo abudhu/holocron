@@ -55,7 +55,7 @@ Out of scope:
 
 Holocron runs `holocron audit .` on every push and gates the build at
 grade A− or better. The current build status and self-grade are
-visible at <https://onedev.amitbudhu.com/holocron/~builds>.
+visible at <https://github.com/abudhu/holocron/actions>.
 
 If you find a vulnerability that Holocron itself *should have caught*
 in its self-audit, please report it the same way — and tell us which

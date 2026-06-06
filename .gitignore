@@ -17,6 +17,7 @@ Cargo.lock.bak
 /.hermes/
 /.claude/
 /.cursor/
+/docs/plans/
 
 # Holocron's own audit reports — dogfood + `holocron audit .` runs
 # now write to .holocron/reports/<ts>.{md,json,sarif,html} under the

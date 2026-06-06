@@ -2,11 +2,17 @@
 
 > *"A Jedi holocron is a repository of wisdom — open it and the truth of your codebase is revealed."*
 
+<p align="center">
+  <img src="docs/assets/hero.png" alt="Holocron audit report — A+ grade with 0.99 score, category breakdown across Security, Lints, Complexity, Dead Code, and Maintenance, and per-auditor status for cargo-audit, cargo-deny, cargo-machete, cargo-outdated, clippy, rust-code-analysis, and cargo-geiger." width="800">
+</p>
+
+<p align="center"><em>Holocron grading itself. All your Rust audits, one report card.</em></p>
+
 **Holocron** is a Rust codebase auditor. It runs eight analyzers in parallel against your project (clippy, cargo-audit, cargo-machete, cargo-deny, cargo-outdated, cargo-geiger, rust-code-analysis, plus opt-in cargo-mutants) and emits a single graded report card you can hand to an LLM, gate a CI build on, share with a non-engineer, or paste into a code review.
 
 ## Status
 
-🟢 **v0.2 shipping.** Eight auditors (seven default + one opt-in), four subcommands (`audit`, `diff`, `init`, `explain`), four output formats (Markdown + JSON + SARIF v2.1.0 + HTML), full `.holocronrc.toml` support (gate, complexity, auditors, weights, allowlist), inline `// holocron: ignore` annotations, live progress display, silent-failure guard on every shell-out auditor, and a CI dogfood gate. See the [issue tracker](https://onedev.amitbudhu.com/holocron/~issues) for what's next.
+🟢 **v0.2 shipping.** Eight auditors (seven default + one opt-in), four subcommands (`audit`, `diff`, `init`, `explain`), four output formats (Markdown + JSON + SARIF v2.1.0 + HTML), full `.holocronrc.toml` support (gate, complexity, auditors, weights, allowlist), inline `// holocron: ignore` annotations, live progress display, silent-failure guard on every shell-out auditor, and a CI dogfood gate. See the [issue tracker](https://github.com/abudhu/holocron/issues) for what's next.
 
 Holocron eats its own dogfood — every push runs `holocron audit .` and gates the build on the grade. Current self-grade: **A+ (0.99)** with one finding suppressed via an inline annotation as intentional design.
 
@@ -14,7 +20,7 @@ Holocron eats its own dogfood — every push runs `holocron audit .` and gates t
 
 ```bash
 # Install Holocron from source (not on crates.io yet)
-git clone https://onedev.amitbudhu.com/holocron
+git clone https://github.com/abudhu/holocron
 cd holocron
 cargo install --path crates/holocron-cli --locked
 
@@ -191,41 +197,44 @@ Match fields are AND-ed: `fingerprint`, `auditor`, `code`, `message_prefix`, `pa
 
 ## CI integration
 
-### OneDev (used by holocron itself)
+### GitHub Actions
 
-See `.onedev-buildspec.yml` in this repo for the canonical pattern. Key points:
-
-```yaml
-# Dogfood step: holocron audits itself
-- type: CommandStep
-  name: dogfood (holocron audits itself)
-  runInContainer: true
-  image: rust:1.84-bookworm
-  interpreter:
-    type: ShellInterpreter
-    shell: /bin/bash
-    commands: |
-      set -euxo pipefail
-      # Pre-warm rustup so parallel auditors don't race on the
-      # /usr/local/rustup/downloads .partial rename.
-      cargo --version
-      rustup component add clippy 2>/dev/null || true
-      # --progress log keeps CI output deterministic + parseable.
-      ./target/release/holocron audit . --progress log --fail-below A-
-```
-
-⚠️ **OneDev buildspec gotcha**: do NOT use bash `$@` or `${arr[@]}` in `commands:` blocks. OneDev's parser treats `@var@` as variable interpolation; an unpaired bare `@` invalidates the spec and silently kills `BranchUpdateTrigger`. Ship `scripts/check-buildspec-atsigns.sh` (in this repo) as a pre-flight CI step.
-
-**Cold-cache install speedup**: prefer `cargo binstall` over `cargo install` for the auditor binaries — precompiled GitHub release artefacts vs from-source compiles. The repo's buildspec does this; install step drops from ~5 min to ~1 min on a cold cache.
-
-### GitHub Actions + Code Scanning
+Full pipeline — installs auditor binaries via `cargo-binstall`, runs the audit, gates the build, and uploads SARIF to Code Scanning:
 
 ```yaml
-- run: holocron audit . --sarif --fail-below A-
-- uses: github/codeql-action/upload-sarif@v3
-  with:
-    sarif_file: ./.holocron/reports/*.sarif
+name: holocron
+on: [push, pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm cargo-audit cargo-machete cargo-deny cargo-outdated cargo-geiger
+      - run: cargo install --git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli --locked
+      - run: cargo install --git https://github.com/abudhu/holocron holocron-cli --locked
+      - run: holocron audit . --sarif --fail-below A-
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ./.holocron/reports/
 ```
+
+### Generic CI (any shell-capable runner)
+
+```bash
+# In a Rust 1.96+ container with rustup + cargo available
+set -euxo pipefail
+cargo --version
+rustup component add clippy 2>/dev/null || true
+# --progress log keeps CI output deterministic + parseable.
+# --fail-below A- gates the build at A− or better.
+holocron audit . --progress log --fail-below A-
+```
+
+**Cold-cache install speedup**: prefer `cargo binstall` over `cargo install` for the auditor binaries — precompiled GitHub release artefacts vs from-source compiles. Install step drops from ~5 min to ~1 min on a cold cache.
 
 ### Pre-commit hook with `diff` mode
 

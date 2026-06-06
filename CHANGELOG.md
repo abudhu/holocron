@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Verified
 - `holocron audit ~/Git/holocron` → **A+ (0.99)** in ~2s with one inline-annotated finding (`Letter::from_str` is a 13-arm dispatch table by design).
-- OneDev CI #32: SUCCESSFUL on `27d23e4` in 129s (cold cache 7 min via cargo-binstall).
+- CI #32: SUCCESSFUL on `27d23e4` in 129s (cold cache 7 min via cargo-binstall).
 - HTML report dogfood: 11.6 KB, renders cleanly in Safari/Chrome/Firefox, print-friendly.
 
 ## [0.1.0] — initial end-to-end audit pipeline
@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — infrastructure
 - MIT license
-- OneDev CI: cargo fmt --check + clippy -D warnings + test all + release smoke build (~ 2 min cold, ~30s warm)
+- CI: cargo fmt --check + clippy -D warnings + test all + release smoke build (~ 2 min cold, ~30s warm)
 - Pedantic + nursery clippy enabled on every crate; Holocron dogfoods its own auditor on every push
 
 ### Verified

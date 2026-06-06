@@ -12,9 +12,8 @@ sustained disruption are not.
 
 This applies to all project spaces:
 
-- The OneDev repository (<https://onedev.amitbudhu.com/holocron>) — issues,
+- The GitHub repository (<https://github.com/abudhu/holocron>) — issues,
   PRs, code review comments
-- Any GitHub mirror's issue tracker / pull request discussions
 - Any reddit / discord / matrix room where the project is officially
   represented
 - One-on-one communications with maintainers when the contact is
