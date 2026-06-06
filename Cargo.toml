@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/holocron-cli", "crates/holocron-core"]
+members = [
+    "crates/holocron-cli",
+    "crates/holocron-core",
+    "crates/holocron-auditors",
+    "crates/holocron-report",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -45,6 +50,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Internal crates
 holocron-core = { path = "crates/holocron-core" }
+holocron-auditors = { path = "crates/holocron-auditors" }
+holocron-report = { path = "crates/holocron-report" }
 
 [profile.release]
 opt-level = 3
