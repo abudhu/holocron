@@ -7,7 +7,6 @@
 use crate::auditor::{AuditorResult, RunStatus};
 use crate::finding::Category;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
 /// Letter grade. Stored as an enum so `Ord` is the natural order.
@@ -136,13 +135,33 @@ impl std::str::FromStr for Letter {
     }
 }
 
-/// Per-category score breakdown.
+/// Per-category outcome. Either a real measurement (`Graded`) or a
+/// documented absence (`Skipped` — the auditor failed, timed out, or
+/// wasn't installed). The old shape used a single struct with a
+/// synthetic 0.85 fallback for failed auditors; that silently
+/// conflated "we have no signal" with "the code is so-so". See #24.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CategoryScore {
-    pub category: Category,
-    pub score: f64,
-    pub letter: Letter,
-    pub finding_count: usize,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CategoryScore {
+    Graded { category: Category, score: f64, letter: Letter, finding_count: usize },
+    Skipped { category: Category, reason: String },
+}
+
+impl CategoryScore {
+    /// The category this score is for. Works for both variants so
+    /// callers can iterate without matching when they only need the
+    /// label (e.g. for rendering a row in order).
+    #[must_use]
+    pub const fn category(&self) -> Category {
+        match self {
+            Self::Graded { category, .. } | Self::Skipped { category, .. } => *category,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped { .. })
+    }
 }
 
 /// Aggregate grade report for one audit run.
@@ -151,6 +170,17 @@ pub struct GradeReport {
     pub overall_score: f64,
     pub overall_letter: Letter,
     pub by_category: Vec<CategoryScore>,
+}
+
+impl GradeReport {
+    /// True if at least one category surfaced as `Skipped` — meaning an
+    /// auditor failed/timed-out/was-missing and we have no measurement
+    /// for it. The CLI uses this to set a distinct exit code so
+    /// "tooling broken" stays distinguishable from "code regressed".
+    #[must_use]
+    pub fn any_skipped(&self) -> bool {
+        self.by_category.iter().any(CategoryScore::is_skipped)
+    }
 }
 
 /// Compute a grade report from a set of auditor results.
@@ -176,19 +206,27 @@ impl<'a> Grade<'a> {
     }
 
     /// Compute the full grade report.
+    ///
+    /// Overall score is a weighted average over only the `Graded`
+    /// categories — skipped ones drop out and the remaining weights are
+    /// renormalized. Rationale: a tooling outage shouldn't silently
+    /// degrade a clean codebase's grade. If every category is skipped
+    /// (no auditors ran at all), overall is 0.0 (F); the CLI surfaces
+    /// that separately via `any_skipped()` + exit code 3.
     #[must_use]
     pub fn compute(&self) -> GradeReport {
         let by_category: Vec<CategoryScore> =
             Category::ALL.iter().map(|&cat| self.category_score(cat)).collect();
 
-        // Build a lookup so weights and scores stay in lockstep.
-        let scores: HashMap<Category, f64> =
-            by_category.iter().map(|cs| (cs.category, cs.score)).collect();
+        let (weighted_sum, total_weight) =
+            Self::CATEGORY_WEIGHTS.iter().fold((0.0_f64, 0.0_f64), |(s, w), (cat, weight)| {
+                by_category.iter().find(|cs| cs.category() == *cat).map_or((s, w), |cs| match cs {
+                    CategoryScore::Graded { score, .. } => (s + score * weight, w + weight),
+                    CategoryScore::Skipped { .. } => (s, w),
+                })
+            });
 
-        let overall_score: f64 = Self::CATEGORY_WEIGHTS
-            .iter()
-            .map(|(cat, w)| scores.get(cat).copied().unwrap_or(1.0) * w)
-            .sum();
+        let overall_score = if total_weight > 0.0 { weighted_sum / total_weight } else { 0.0 };
 
         GradeReport {
             overall_score,
@@ -198,27 +236,38 @@ impl<'a> Grade<'a> {
     }
 
     fn category_score(&self, category: Category) -> CategoryScore {
-        let findings_iter =
-            self.results.iter().flat_map(|r| r.findings.iter()).filter(|f| f.category == category);
-        let findings: Vec<_> = findings_iter.collect();
-        let finding_count = findings.len();
-
-        // If an auditor that owns this category failed outright, we
-        // treat it as score=0.85 (penalty for missing signal) rather
-        // than 0.0 — we don't know if it would have found nothing or
-        // everything.
-        let category_auditor_failed = self.results.iter().any(|r| {
-            r.category == category && matches!(r.status, RunStatus::Failed | RunStatus::TimedOut)
+        // If an auditor that owns this category failed / timed out /
+        // wasn't installed, surface it as Skipped — NOT as a graded
+        // fallback. Was #24: the old 0.85 fallback silently masked
+        // tooling outages as code-quality signal.
+        let degraded = self.results.iter().find(|r| {
+            r.category == category
+                && matches!(
+                    r.status,
+                    RunStatus::Failed | RunStatus::TimedOut | RunStatus::SkippedMissing
+                )
         });
+        if let Some(r) = degraded {
+            return CategoryScore::Skipped {
+                category,
+                reason: r
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("auditor {} reported {:?}", r.auditor, r.status)),
+            };
+        }
 
-        let score = if category_auditor_failed && finding_count == 0 {
-            0.85
-        } else {
-            let penalty: f64 = findings.iter().map(|f| f.severity.weight()).sum();
-            (1.0 - penalty).max(0.0)
-        };
+        let findings: Vec<_> = self
+            .results
+            .iter()
+            .flat_map(|r| r.findings.iter())
+            .filter(|f| f.category == category)
+            .collect();
+        let finding_count = findings.len();
+        let penalty: f64 = findings.iter().map(|f| f.severity.weight()).sum();
+        let score = (1.0 - penalty).max(0.0);
 
-        CategoryScore { category, score, letter: Letter::from_score(score), finding_count }
+        CategoryScore::Graded { category, score, letter: Letter::from_score(score), finding_count }
     }
 }
 
@@ -259,10 +308,15 @@ mod tests {
         )];
         let report = Grade::new(&results).compute();
 
-        let sec = report.by_category.iter().find(|c| c.category == Category::Security).unwrap();
+        let sec = report.by_category.iter().find(|c| c.category() == Category::Security).unwrap();
         // 1.0 - 0.5 = 0.5 → F
-        assert!((sec.score - 0.5).abs() < 1e-9);
-        assert_eq!(sec.letter, Letter::F);
+        match sec {
+            CategoryScore::Graded { score, letter, .. } => {
+                assert!((score - 0.5).abs() < 1e-9);
+                assert_eq!(*letter, Letter::F);
+            }
+            CategoryScore::Skipped { .. } => panic!("Security should be Graded here"),
+        }
     }
 
     #[test]
@@ -271,18 +325,30 @@ mod tests {
             .map(|i| Finding::new("clippy", Category::Lints, Severity::Low, format!("nit-{i}")))
             .collect();
         let report = Grade::new(&[auditor_result_with(Category::Lints, findings)]).compute();
-        let lints = report.by_category.iter().find(|c| c.category == Category::Lints).unwrap();
+        let lints = report.by_category.iter().find(|c| c.category() == Category::Lints).unwrap();
         // 1.0 - 10*0.01 = 0.9 → A−
-        assert!((lints.score - 0.9).abs() < 1e-9);
-        assert_eq!(lints.letter, Letter::AMinus);
+        match lints {
+            CategoryScore::Graded { score, letter, .. } => {
+                assert!((score - 0.9).abs() < 1e-9);
+                assert_eq!(*letter, Letter::AMinus);
+            }
+            CategoryScore::Skipped { .. } => panic!("Lints should be Graded here"),
+        }
     }
 
     #[test]
     fn clean_categories_stay_at_a_plus() {
         let report = Grade::new(&[auditor_result_with(Category::Lints, vec![])]).compute();
         for cs in &report.by_category {
-            assert!((cs.score - 1.0).abs() < 1e-9);
-            assert_eq!(cs.letter, Letter::APlus);
+            match cs {
+                CategoryScore::Graded { score, letter, .. } => {
+                    assert!((score - 1.0).abs() < 1e-9);
+                    assert_eq!(*letter, Letter::APlus);
+                }
+                CategoryScore::Skipped { .. } => {
+                    panic!("no auditors failed, nothing should be Skipped")
+                }
+            }
         }
     }
 
