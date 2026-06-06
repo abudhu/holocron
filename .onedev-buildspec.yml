@@ -1,17 +1,4 @@
-## OneDev buildspec gotcha — DO NOT use bare `@` in any commands block
-##
-## OneDev's buildspec validator treats the at-sign as a variable-interpolation
-## delimiter (`@varname@`). An unpaired bare at-sign anywhere in a step's
-## `commands:` block — including bash `$@`, `${array[@]}`, or even literal
-## at-signs in comments — invalidates the ENTIRE spec. When that happens,
-## `BranchUpdateTrigger` silently stops firing on push and the only diagnostic
-## is to click "Run" manually in the OneDev UI.
-##
-## See `scripts/check-buildspec-atsigns.sh` for the pre-commit guard.
-## See holocron issue #25 for the doc + onedev-ci skill pitfall #11 for the
-## full diagnosis playbook.
-
-version: 47
+version: 49
 jobs:
 - name: CI
   steps:
@@ -22,47 +9,31 @@ jobs:
     withLfs: false
     withSubmodules: false
     condition: SUCCESSFUL
-  # Pre-flight: catch the OneDev buildspec `@` parser gotcha BEFORE the
-  # rest of the job spends real time (clone + cargo cache + compile).
-  # If someone reintroduces `$@` or similar, fail loudly here so the
-  # diagnostic isn't "BranchUpdateTrigger silently stopped firing" 30
-  # minutes from now. See holocron issue #25.
+    optional: false
   - type: CommandStep
     name: lint buildspec for at-sign hazards
     runInContainer: true
     image: debian:bookworm-slim
-    runAs: '0:0'
     interpreter:
       type: ShellInterpreter
       shell: /bin/bash
       commands: |
         set -euo pipefail
         ./scripts/check-buildspec-atsigns.sh .onedev-buildspec.yml
+    runAs: 0:0
     useTTY: false
     condition: SUCCESSFUL
-  # Cargo registry + git index cache. Key has no checksum-files so it's
-  # always a partial-match restore — registry index churns frequently
-  # but is cheap to refresh incrementally.
-  # Key bumped v1 -> v2 to force a fresh cache on the next build so we
-  # can measure #33's binstall change against a true cold cache.
-  # Baseline: build #7 (last known cold cache) = 13.7m total, install
-  # step ~5m of that. Hypothesis: install drops to ~1m via cargo-binstall.
-  # If the cold-cache run completes cleanly we keep v2 going forward;
-  # the old v1 cache entry just sits unused.
+    optional: false
   - type: SetupCacheStep
     name: cache cargo home
     key: cargo-home-v2
     paths:
     - .cargo-home/registry
     - .cargo-home/git
-    # Cache installed cargo binaries (cargo-audit, cargo-machete,
-    # rust-code-analysis-cli) so the first run pays the install cost
-    # once and every subsequent run reuses them.
     - .cargo-home/bin
     uploadStrategy: UPLOAD_IF_NOT_EXACT_MATCH
     condition: SUCCESSFUL
-  # Compiled artefacts. Keyed off Cargo.lock — a lockfile change
-  # invalidates and re-uploads. Lockfile-stable iterations reuse.
+    optional: false
   - type: SetupCacheStep
     name: cache cargo target
     key: cargo-target
@@ -71,18 +42,12 @@ jobs:
     - target
     uploadStrategy: UPLOAD_IF_NOT_EXACT_MATCH
     condition: SUCCESSFUL
+    optional: false
   - type: CommandStep
     name: fmt + clippy + test
     runInContainer: true
-    # rust:1.84-bookworm ships rustc + cargo + git. rustfmt/clippy
-    # components are added explicitly inside the step because the
-    # base image strips them to keep size down.
     image: rust:1.84-bookworm
-    runAs: '0:0'
     interpreter:
-      # DefaultInterpreter executes the script with /bin/sh (dash on
-      # Debian), which does NOT support `set -o pipefail`. Force bash
-      # via the shebang so we get bash semantics throughout.
       type: ShellInterpreter
       shell: /bin/bash
       commands: |
@@ -112,27 +77,14 @@ jobs:
         echo "=== release smoke ==="
         cargo build --release --bin holocron
         ./target/release/holocron --version
+    runAs: 0:0
     useTTY: false
     condition: SUCCESSFUL
-  # Pre-install the external auditor binaries that Holocron orchestrates.
-  # Doing this as a discrete step (rather than relying on --install-missing
-  # inside the gate step) means transient network blips fail this step
-  # cleanly and the rerun has a clear, scoped retry target. Cached into
-  # .cargo-home/bin so steady-state runs skip all of this.
-  #
-  # COLD-CACHE OPTIMIZATION (#33): use cargo-binstall to fetch precompiled
-  # binaries instead of compiling from source. Each `cargo install` of a
-  # mid-size auditor like cargo-deny or cargo-geiger takes 60-120s; binstall
-  # downloads the GitHub release artefact in 5-15s. Total install step:
-  # ~5min cold -> ~1min cold, while warm-cache behaviour is unchanged
-  # (the `command -v $name` check short-circuits before any install).
-  # rust-code-analysis-cli has no GitHub binary releases, so it falls
-  # back to the from-source path.
+    optional: false
   - type: CommandStep
     name: install auditor binaries
     runInContainer: true
     image: rust:1.84-bookworm
-    runAs: '0:0'
     interpreter:
       type: ShellInterpreter
       shell: /bin/bash
@@ -197,20 +149,14 @@ jobs:
 
         echo "=== installed binaries ==="
         ls -la "$CARGO_HOME/bin"
+    runAs: 0:0
     useTTY: false
     condition: SUCCESSFUL
-  # Dogfood gate (#20). After Holocron compiles, audit its own source
-  # tree and require an A- or better overall grade.
-  #
-  # If this step fails, the change introduced a quality regression
-  # holocron itself can detect. Fix the findings or, if the regression
-  # is intentional, lower the threshold here with the reasoning in the
-  # commit message.
+    optional: false
   - type: CommandStep
     name: dogfood (holocron audits itself)
     runInContainer: true
     image: rust:1.84-bookworm
-    runAs: '0:0'
     interpreter:
       type: ShellInterpreter
       shell: /bin/bash
@@ -232,14 +178,31 @@ jobs:
 
         echo "=== holocron audits holocron ==="
         ./target/release/holocron audit . --progress log --fail-below A-
+    runAs: 0:0
     useTTY: false
     condition: SUCCESSFUL
+    optional: false
   triggers:
   - type: BranchUpdateTrigger
     userMatch: anyone
   retryCondition: never
   maxRetries: 0
   retryDelay: 30
-  # Bumped from 1800 → 3600 to give --install-missing room on a cold
-  # cache (cargo-audit + machete + rust-code-analysis-cli total ~5 min).
   timeout: 3600
+- name: Push to Github
+  steps:
+  - type: PushRepository
+    name: Github
+    remoteUrl: https://github.com/abudhu/holocron
+    passwordSecret: access-token
+    force: true
+    condition: SUCCESSFUL
+    optional: false
+  triggers:
+  - type: BranchUpdateTrigger
+    userMatch: anyone
+  - type: TagCreateTrigger
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
