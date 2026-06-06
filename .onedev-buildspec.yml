@@ -77,11 +77,57 @@ jobs:
         ./target/release/holocron --version
     useTTY: false
     condition: SUCCESSFUL
+  # Pre-install the external auditor binaries that Holocron orchestrates.
+  # Doing this as a discrete step (rather than relying on --install-missing
+  # inside the gate step) means transient network blips fail this step
+  # cleanly and the rerun has a clear, scoped retry target. Cached into
+  # .cargo-home/bin so steady-state runs skip all of this.
+  - type: CommandStep
+    name: install auditor binaries
+    runInContainer: true
+    image: rust:1.84-bookworm
+    runAs: '0:0'
+    interpreter:
+      type: ShellInterpreter
+      shell: /bin/bash
+      commands: |
+        set -euxo pipefail
+        export CARGO_HOME="$(pwd)/.cargo-home"
+        export PATH="$CARGO_HOME/bin:$PATH"
+        mkdir -p "$CARGO_HOME/bin"
+
+        # Resilient cargo-install: retry on the transient "http2: client
+        # connection lost" error we see when crates.io has a network blip.
+        install_one() {
+          local name="$1"; shift
+          if command -v "$name" >/dev/null 2>&1; then
+            echo "=== $name already installed: $(command -v $name) ==="
+            return 0
+          fi
+          for attempt in 1 2 3; do
+            echo "=== installing $name (attempt $attempt) ==="
+            if cargo install "$@" --locked; then
+              return 0
+            fi
+            echo "=== attempt $attempt failed, sleeping 10s ==="
+            sleep 10
+          done
+          echo "=== $name install failed after 3 attempts ==="
+          return 1
+        }
+
+        install_one cargo-audit cargo-audit
+        install_one cargo-machete cargo-machete
+        install_one cargo-deny cargo-deny
+        install_one cargo-outdated cargo-outdated
+        install_one rust-code-analysis-cli --git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli
+
+        echo "=== installed binaries ==="
+        ls -la "$CARGO_HOME/bin"
+    useTTY: false
+    condition: SUCCESSFUL
   # Dogfood gate (#20). After Holocron compiles, audit its own source
-  # tree and require an A- or better overall grade. --install-missing
-  # bootstraps any auditor binary not in the cargo bin cache; on a
-  # fresh cache this adds ~5 min for the cargo-audit/machete/RCA
-  # installs, but subsequent runs reuse the cached binaries.
+  # tree and require an A- or better overall grade.
   #
   # If this step fails, the change introduced a quality regression
   # holocron itself can detect. Fix the findings or, if the regression
@@ -102,7 +148,7 @@ jobs:
         export PATH="$CARGO_HOME/bin:$PATH"
 
         echo "=== holocron audits holocron ==="
-        ./target/release/holocron audit . --install-missing --fail-below A-
+        ./target/release/holocron audit . --fail-below A-
     useTTY: false
     condition: SUCCESSFUL
   triggers:
