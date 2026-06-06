@@ -384,6 +384,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
 ]
 

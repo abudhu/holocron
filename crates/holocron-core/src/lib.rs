@@ -10,11 +10,15 @@
 #![doc(html_root_url = "https://onedev.amitbudhu.com/holocron")]
 
 pub mod auditor;
+pub mod config;
 pub mod finding;
 pub mod grade;
 pub mod runner;
 
 pub use auditor::{Auditor, AuditorMeta, AuditorResult, RunStatus};
+pub use config::{
+    AllowlistEntry, AuditorsConfig, ComplexityConfig, GateConfig, HolocronConfig, WeightsConfig,
+};
 pub use finding::{Category, Finding, Location, Severity};
 pub use grade::{CategoryScore, Grade, GradeReport, Letter};
 pub use runner::{RunOutcome, Runner};
