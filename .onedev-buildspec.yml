@@ -199,7 +199,7 @@ jobs:
         rustup component add clippy 2>/dev/null || true
 
         echo "=== holocron audits holocron ==="
-        ./target/release/holocron audit . --fail-below A-
+        ./target/release/holocron audit . --progress log --fail-below A-
     useTTY: false
     condition: SUCCESSFUL
   triggers:

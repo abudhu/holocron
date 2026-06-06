@@ -1,14 +1,37 @@
 //! The parallel [`Runner`] — orchestrates a set of [`Auditor`]s against
 //! a target Rust project and collects their results.
 
-use crate::auditor::{Auditor, AuditorResult, RunStatus};
+use crate::auditor::{Auditor, AuditorMeta, AuditorResult, RunStatus};
 use crate::finding::Finding;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{info, warn};
+
+/// Lifecycle event emitted by [`Runner`] when a progress sink is attached.
+///
+/// Consumers render these to a TTY spinner block, an event log, JSON,
+/// or whatever else makes sense. Always emitted in pairs:
+/// `Started` followed by `Finished` for the same auditor name.
+#[derive(Debug, Clone)]
+pub enum AuditorEvent {
+    /// An auditor has begun executing (or about to begin: emitted just
+    /// before [`run_one`] starts). Carries enough context to look up
+    /// the auditor by name in any sink state.
+    Started { meta: AuditorMeta },
+    /// An auditor has finished. `status` mirrors the [`AuditorResult`]
+    /// that will appear in the final outcome; `duration` is the wall
+    /// time observed by the runner (timeouts report the configured
+    /// timeout, not the actual block time).
+    Finished { meta: AuditorMeta, status: RunStatus, duration: Duration },
+}
+
+/// Tx half of an unbounded channel used to ship [`AuditorEvent`]s to a
+/// progress display. Cheap to clone (just an `mpsc::UnboundedSender`).
+pub type ProgressSink = mpsc::UnboundedSender<AuditorEvent>;
 
 /// Aggregate result of one run across all configured auditors.
 #[derive(Debug, Clone)]
@@ -55,6 +78,7 @@ pub struct Runner {
     auditors: Vec<Arc<dyn Auditor>>,
     per_auditor_timeout: Duration,
     install_missing: bool,
+    progress: Option<ProgressSink>,
 }
 
 impl Runner {
@@ -67,6 +91,7 @@ impl Runner {
             auditors: vec![],
             per_auditor_timeout: Duration::from_secs(300),
             install_missing: false,
+            progress: None,
         }
     }
 
@@ -89,6 +114,17 @@ impl Runner {
     #[must_use]
     pub const fn with_install_missing(mut self, install: bool) -> Self {
         self.install_missing = install;
+        self
+    }
+
+    /// Attach a progress sink — the runner will emit [`AuditorEvent`]s
+    /// as each auditor starts and finishes. Use this to drive a TTY
+    /// spinner block, an event log, or any other live display (#36).
+    /// Send failures are logged at debug but otherwise ignored — the
+    /// runner never stalls because a display dropped the receiver.
+    #[must_use]
+    pub fn with_progress(mut self, sink: ProgressSink) -> Self {
+        self.progress = Some(sink);
         self
     }
 
@@ -115,8 +151,25 @@ impl Runner {
             let target = Arc::clone(&target);
             let auditor_timeout = self.per_auditor_timeout;
             let install_missing = self.install_missing;
+            let progress = self.progress.clone();
             set.spawn(async move {
-                run_one(auditor, target.as_path(), auditor_timeout, install_missing).await
+                let meta = auditor.meta();
+                if let Some(p) = &progress {
+                    // Send failures are non-fatal: the display task may
+                    // have already dropped its receiver. Don't stall
+                    // the audit because nobody's watching.
+                    let _ = p.send(AuditorEvent::Started { meta });
+                }
+                let result =
+                    run_one(auditor, target.as_path(), auditor_timeout, install_missing).await;
+                if let Some(p) = &progress {
+                    let _ = p.send(AuditorEvent::Finished {
+                        meta,
+                        status: result.status,
+                        duration: result.duration,
+                    });
+                }
+                result
             });
         }
 

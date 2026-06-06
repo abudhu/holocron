@@ -11,6 +11,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 use tracing::info;
 
+mod progress;
+use progress::ProgressMode;
+
 #[derive(Parser, Debug)]
 #[command(name = "holocron", version, about = "Audit a Rust codebase and produce a graded report card", long_about = None)]
 struct Cli {
@@ -87,10 +90,18 @@ struct AuditArgs {
     sarif: bool,
 
     /// Install any auditor binaries that aren't on PATH (cargo-audit,
-    /// cargo-machete, rust-code-analysis-cli). Default false — Holocron
+    /// cargo-machete, rust-code-analysis-cli). Without this flag we
     /// will report them as skipped instead.
     #[arg(long)]
     install_missing: bool,
+
+    /// Live progress display while auditors run (#36).
+    ///   auto (default): TTY block if stderr is a terminal, log otherwise.
+    ///   tty: force in-place spinner block.
+    ///   log: force timestamped one-line-per-event log.
+    ///   off: no progress output.
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 
     /// Per-auditor timeout, in seconds. Default 600 (10 minutes).
     /// Complexity scans on large projects can take several minutes.
@@ -364,14 +375,33 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     // categories as Skipped, distinct from missing-binary or runtime
     // failures (#28).
     let (enabled, disabled_results) = default_set_partitioned(thresholds, &rc.auditors);
-    let mut outcome =
-        build_runner(&target, &args, enabled).run().await.context("running auditors")?;
-    outcome.auditor_results.extend(disabled_results);
+
+    // Set up the progress display (#36). For Off mode we skip the sink
+    // entirely so we don't pay for an unused channel/task. Both branches
+    // produce a `RunOutcome` so the rest of audit() is mode-agnostic.
+    let outcome = if let Some(mode) = progress::resolve_mode(args.progress) {
+        let (sink, handle) = progress::spawn_display(mode, enabled.len());
+        let runner = build_runner(&target, &args, enabled).with_progress(sink.clone());
+        // sink moves into the runner via with_progress; drop our copy
+        // so the receiver gets the close signal when the runner ends.
+        drop(sink);
+        let mut outcome = runner.run().await.context("running auditors")?;
+        outcome.auditor_results.extend(disabled_results);
+        // Wait for the display task to drain remaining events + render
+        // its final frame. Bounded — events are already in flight.
+        let _ = handle.await;
+        outcome
+    } else {
+        let mut outcome =
+            build_runner(&target, &args, enabled).run().await.context("running auditors")?;
+        outcome.auditor_results.extend(disabled_results);
+        outcome
+    };
 
     // Merge [weights] from rc onto built-in defaults (#30). Missing keys
     // keep defaults. We warn if the sum drifts > 0.01 from 1.0 because
     // the report scale becomes non-intuitive (overall still computes
-    // because Grade::compute renormalizes — see the with_weights doc).
+    // because `Grade::compute` renormalizes — see the with_weights doc).
     let weights = merge_weights(&rc.weights);
     warn_if_weights_skewed(&weights);
     let grade = Grade::new(&outcome.auditor_results).with_weights(weights).compute();

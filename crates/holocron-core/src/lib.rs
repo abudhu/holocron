@@ -21,7 +21,7 @@ pub use config::{
 };
 pub use finding::{Category, Finding, Location, Severity};
 pub use grade::{CategoryScore, Grade, GradeReport, Letter};
-pub use runner::{RunOutcome, Runner};
+pub use runner::{AuditorEvent, ProgressSink, RunOutcome, Runner};
 
 /// Crate version, exposed for report headers and the CLI's `--version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
