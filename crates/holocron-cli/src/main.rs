@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use holocron_auditors::default_set;
-use holocron_core::{Grade, Letter, Runner};
+use holocron_core::{CategoryScore, Grade, GradeReport, Letter, Runner};
 use holocron_report::{render_json, render_markdown, Report};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -95,21 +95,80 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     let (md_path, json_path) = write_reports(&report, &target, &args)?;
     print_summary(&grade, &md_path, json_path.as_deref());
 
-    // CI gate: only enforced when --fail-below is set. Without it, we
-    // always exit 0 so existing scripts that don't expect a gate keep
-    // working.
-    if let Some(threshold) = args.fail_below {
-        if grade.overall_letter < threshold {
+    // Decide exit code + emit the right user-facing banner.
+    //
+    // Precedence:
+    //   1 = gate failed (--fail-below; quality regression)
+    //   3 = auditor outage (one or more categories couldn't be measured)
+    //   0 = clean / gate passed
+    // Gate failure wins over outage so a regression isn't masked when
+    // BOTH happened.
+    let exit_kind = decide_exit(&grade, args.fail_below);
+    match exit_kind {
+        ExitKind::GateFailed(threshold) => eprintln!(
+            "\nGATE FAILED: grade {} is below threshold {}",
+            grade.overall_letter, threshold
+        ),
+        ExitKind::AuditorOutage => {
+            let skipped: Vec<String> = grade
+                .by_category
+                .iter()
+                .filter_map(|cs| match cs {
+                    CategoryScore::Skipped { category, reason } => {
+                        Some(format!("  {category}: {reason}"))
+                    }
+                    CategoryScore::Graded { .. } => None,
+                })
+                .collect();
             eprintln!(
-                "\nGATE FAILED: grade {} is below threshold {}",
-                grade.overall_letter, threshold
+                "\nAUDITOR OUTAGE: {} categor{} skipped — overall grade is advisory.\n{}",
+                skipped.len(),
+                if skipped.len() == 1 { "y was" } else { "ies were" },
+                skipped.join("\n"),
             );
-            return Ok(ExitCode::from(1));
         }
-        println!("Gate passed: {} ≥ {}", grade.overall_letter, threshold);
+        ExitKind::Clean => {
+            if let Some(threshold) = args.fail_below {
+                println!("Gate passed: {} ≥ {}", grade.overall_letter, threshold);
+            }
+        }
     }
+    Ok(exit_kind.into())
+}
 
-    Ok(ExitCode::SUCCESS)
+/// Distinct exit signals from `holocron audit`.
+///
+/// Modeled as an enum (not bare `u8`/`ExitCode`) so the decision logic
+/// is testable and the banner-printing match can be exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitKind {
+    Clean,
+    GateFailed(Letter),
+    AuditorOutage,
+}
+
+impl From<ExitKind> for ExitCode {
+    fn from(k: ExitKind) -> Self {
+        match k {
+            ExitKind::Clean => Self::SUCCESS,
+            ExitKind::GateFailed(_) => Self::from(1),
+            ExitKind::AuditorOutage => Self::from(3),
+        }
+    }
+}
+
+/// Decide the process exit based on grade + gate threshold + skip count.
+/// Precedence: gate failure > auditor outage > clean.
+fn decide_exit(grade: &GradeReport, threshold: Option<Letter>) -> ExitKind {
+    if let Some(t) = threshold {
+        if grade.overall_letter < t {
+            return ExitKind::GateFailed(t);
+        }
+    }
+    if grade.any_skipped() {
+        return ExitKind::AuditorOutage;
+    }
+    ExitKind::Clean
 }
 
 /// Construct the [`Runner`] with the default auditor set and CLI flags applied.
@@ -159,13 +218,24 @@ fn print_summary(grade: &holocron_core::GradeReport, md_path: &Path, json_path: 
     println!("===============================================");
     println!("  Grade: {}  ({:.2})", grade.overall_letter, grade.overall_score);
     for cs in &grade.by_category {
-        println!(
-            "    {:<11}  {:<3}  {:.2}  ({} findings)",
-            cs.category.to_string(),
-            cs.letter.to_string(),
-            cs.score,
-            cs.finding_count
-        );
+        match cs {
+            CategoryScore::Graded { category, score, letter, finding_count } => {
+                println!(
+                    "    {:<11}  {:<3}  {:.2}  ({} findings)",
+                    category.to_string(),
+                    letter.to_string(),
+                    score,
+                    finding_count
+                );
+            }
+            CategoryScore::Skipped { category, reason } => {
+                // Trim the reason for the one-line summary; full text is
+                // in the report file.
+                let short = reason.lines().next().unwrap_or("");
+                let short = if short.len() > 50 { &short[..50] } else { short };
+                println!("    {:<11}  —    —     (skipped: {short})", category.to_string());
+            }
+        }
     }
     println!();
     println!("  Markdown report: {}", md_path.display());
@@ -235,5 +305,98 @@ mod tests {
         let d = TempDir::new().unwrap();
         let err = resolve_target(d.path()).unwrap_err();
         assert!(err.to_string().contains("Cargo.toml") || err.to_string().contains("path"));
+    }
+
+    // --- Exit code decision tree (#24) ---
+
+    use holocron_core::CategoryScore as CS;
+
+    fn graded_report(letter: Letter, score: f64) -> GradeReport {
+        GradeReport {
+            overall_letter: letter,
+            overall_score: score,
+            by_category: vec![CS::Graded {
+                category: holocron_core::Category::Lints,
+                score,
+                letter,
+                finding_count: 0,
+            }],
+        }
+    }
+
+    fn graded_with_one_skipped(letter: Letter, score: f64) -> GradeReport {
+        GradeReport {
+            overall_letter: letter,
+            overall_score: score,
+            by_category: vec![
+                CS::Graded {
+                    category: holocron_core::Category::Lints,
+                    score,
+                    letter,
+                    finding_count: 0,
+                },
+                CS::Skipped {
+                    category: holocron_core::Category::Security,
+                    reason: "cargo-audit failed".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn decide_exit_clean_when_no_threshold_and_no_skipped() {
+        let r = graded_report(Letter::APlus, 1.0);
+        assert_eq!(decide_exit(&r, None), ExitKind::Clean);
+    }
+
+    #[test]
+    fn decide_exit_gate_failed_when_below_threshold() {
+        let r = graded_report(Letter::C, 0.74);
+        match decide_exit(&r, Some(Letter::AMinus)) {
+            ExitKind::GateFailed(t) => assert_eq!(t, Letter::AMinus),
+            other => panic!("expected GateFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_exit_clean_when_at_or_above_threshold() {
+        let r = graded_report(Letter::AMinus, 0.90);
+        assert_eq!(decide_exit(&r, Some(Letter::AMinus)), ExitKind::Clean);
+        let r = graded_report(Letter::APlus, 1.0);
+        assert_eq!(decide_exit(&r, Some(Letter::AMinus)), ExitKind::Clean);
+    }
+
+    #[test]
+    fn decide_exit_auditor_outage_takes_precedence_over_clean() {
+        // Grade passes the gate, but Security was skipped → exit 3.
+        let r = graded_with_one_skipped(Letter::A, 0.95);
+        assert_eq!(decide_exit(&r, Some(Letter::AMinus)), ExitKind::AuditorOutage);
+        // Same without threshold: any skipped → outage.
+        assert_eq!(decide_exit(&r, None), ExitKind::AuditorOutage);
+    }
+
+    #[test]
+    fn decide_exit_gate_failed_takes_precedence_over_outage() {
+        // Both regressed AND skipped → user's primary signal is the
+        // regression, not the outage. Gate wins.
+        let r = graded_with_one_skipped(Letter::C, 0.74);
+        match decide_exit(&r, Some(Letter::AMinus)) {
+            ExitKind::GateFailed(_) => {} // ok
+            other => panic!("gate failure must win over outage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_kind_maps_to_distinct_exit_codes() {
+        // Smoke test the ExitKind → ExitCode conversion. We can't read
+        // the inner u8 of ExitCode, but we can debug-format it.
+        let clean = format!("{:?}", ExitCode::from(ExitKind::Clean));
+        let gate = format!("{:?}", ExitCode::from(ExitKind::GateFailed(Letter::AMinus)));
+        let outage = format!("{:?}", ExitCode::from(ExitKind::AuditorOutage));
+        // Debug repr is "ExitCode(unix_exit_status(0))" on Linux/macOS — just
+        // assert the three are different and the integers appear.
+        assert!(clean.contains('0'));
+        assert!(gate.contains('1'));
+        assert!(outage.contains('3'));
     }
 }

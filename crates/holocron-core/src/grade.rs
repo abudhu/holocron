@@ -135,11 +135,12 @@ impl std::str::FromStr for Letter {
     }
 }
 
-/// Per-category outcome. Either a real measurement (`Graded`) or a
-/// documented absence (`Skipped` — the auditor failed, timed out, or
-/// wasn't installed). The old shape used a single struct with a
-/// synthetic 0.85 fallback for failed auditors; that silently
-/// conflated "we have no signal" with "the code is so-so". See #24.
+/// Per-category outcome — either a real measurement or a documented absence.
+///
+/// The two variants exist so failed auditors don't silently grade as
+/// the old `0.85` fallback. `Graded` carries the score; `Skipped`
+/// carries a reason (the auditor failed, timed out, or wasn't
+/// installed). See #24.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CategoryScore {
