@@ -18,10 +18,11 @@ Cargo.lock.bak
 /.claude/
 /.cursor/
 
-# Holocron's own scratch — when holocron runs itself, reports go to /tmp by default
-# but if anyone redirects them in-tree, keep them out
-holocron-report-*.md
-holocron-report-*.json
+# Holocron's own audit reports — dogfood + `holocron audit .` runs
+# now write to .holocron/reports/<ts>.{md,json,sarif,html} under the
+# audited project. Keep the dir itself out of git; the tool recreates
+# it on demand.
+/.holocron/
 
 # Direnv
 .envrc.local

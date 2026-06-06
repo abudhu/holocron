@@ -32,9 +32,11 @@ rustup component add clippy
 holocron audit ~/Git/my-rust-project
 ```
 
-You get a live progress display on stderr while auditors run, a grade card on stdout when they finish, a Markdown report at `/tmp/holocron-<slug>-<ts>.md`, and a JSON sidecar at the same path with `.json`.
+You get a live progress display on stderr while auditors run, a grade card on stdout when they finish, a Markdown report at `<project>/.holocron/reports/<ts>.md`, and a JSON sidecar at the same path with `.json`. Reports live inside the project (not `/tmp`) so they travel with the code under review and survive reboots / tmpwatch.
 
 Want more? `--html` gives you a self-contained dark-themed HTML page for sharing. `--sarif` gives you GitHub Code Scanning-ready output.
+
+Add `.holocron/` to your `.gitignore` — the tool recreates the directory on demand and you don't want timestamped audit artefacts in version control.
 
 ## What gets graded
 
@@ -78,7 +80,7 @@ Useful flags:
 
 | Flag                    | Effect                                                                                |
 | :---------------------- | :------------------------------------------------------------------------------------ |
-| `--output <file>`       | Override the default `/tmp/holocron-<slug>-<ts>.md` location                          |
+| `--output <file>`       | Override the default `<project>/.holocron/reports/<ts>.md` location                   |
 | `--no-json`             | Skip the JSON sidecar                                                                 |
 | `--sarif`               | Also emit a SARIF v2.1.0 sidecar for GitHub Code Scanning / Azure DevOps              |
 | `--html`                | Also emit a self-contained HTML report (dark theme, no JS, no external assets)        |
@@ -136,11 +138,15 @@ Pass `--force` to overwrite an existing rc file.
 Looks up a single finding by 16-char hex fingerprint and prints an LLM-friendly Markdown block ready to paste into Cortana / Codex / Claude Code:
 
 ```bash
-# Auto-discovers the most recent /tmp/holocron-*.json sidecar
+# Auto-discovers the most recent <target>/.holocron/reports/*.json
+# (--target defaults to .; walks up looking for Cargo.toml like `audit`)
 holocron explain a1b2c3d4e5f60718
 
-# Or specify the sidecar
-holocron explain a1b2c3d4e5f60718 --from /tmp/holocron-my-proj-<ts>.json
+# Or specify the sidecar explicitly
+holocron explain a1b2c3d4e5f60718 --from .holocron/reports/1780773920.json
+
+# Or scan a different project's reports
+holocron explain a1b2c3d4e5f60718 --target ~/Git/some-other-project
 
 # Pipe straight into an agent
 holocron explain a1b2c3d4e5f60718 | pbcopy
@@ -215,10 +221,10 @@ See `.onedev-buildspec.yml` in this repo for the canonical pattern. Key points:
 ### GitHub Actions + Code Scanning
 
 ```yaml
-- run: holocron audit . --sarif --output /tmp/audit.md --fail-below A-
+- run: holocron audit . --sarif --fail-below A-
 - uses: github/codeql-action/upload-sarif@v3
   with:
-    sarif_file: /tmp/audit.sarif
+    sarif_file: ./.holocron/reports/*.sarif
 ```
 
 ### Pre-commit hook with `diff` mode
@@ -319,6 +325,12 @@ All four crates lint at `clippy::pedantic + clippy::nursery + -D warnings`. Test
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow + style
+expectations. Security issues: see [SECURITY.md](./SECURITY.md). All
+participation is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## Author
 

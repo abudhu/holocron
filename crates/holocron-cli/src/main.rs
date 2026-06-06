@@ -79,9 +79,15 @@ struct ExplainArgs {
     fingerprint: String,
 
     /// JSON sidecar from a prior `holocron audit` run. Defaults to the
-    /// most recent `/tmp/holocron-*-*.json` (lexicographic).
+    /// most recent `<target>/.holocron/reports/*.json` (lexicographic).
     #[arg(long)]
     from: Option<PathBuf>,
+
+    /// Project to scan for the most-recent sidecar when `--from` is
+    /// omitted. Defaults to the current directory; walks up looking for
+    /// a `Cargo.toml` the same way `holocron audit` resolves a target.
+    #[arg(long, default_value = ".")]
+    target: PathBuf,
 }
 
 #[derive(clap::Args, Debug)]
@@ -242,11 +248,23 @@ fn init(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the sidecar path `explain()` should read. Either the explicit
+/// `--from` value, or the lexicographically-latest JSON under
+/// `<target>/.holocron/reports/`. Extracted from `explain()` to keep
+/// its cyclomatic below threshold (caught by holocron dogfooding itself
+/// after the path migration off /tmp).
+fn resolve_sidecar_path(args: &ExplainArgs) -> Result<PathBuf> {
+    if let Some(p) = &args.from {
+        return Ok(p.clone());
+    }
+    let target = resolve_target(&args.target).with_context(|| {
+        format!("resolving target {} for sidecar auto-discovery", args.target.display())
+    })?;
+    latest_audit_json(&target)
+}
+
 fn explain(args: &ExplainArgs) -> Result<()> {
-    let path = match &args.from {
-        Some(p) => p.clone(),
-        None => latest_audit_json()?,
-    };
+    let path = resolve_sidecar_path(args)?;
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("reading sidecar {}", path.display()))?;
     let sidecar: serde_json::Value =
@@ -282,28 +300,28 @@ fn explain(args: &ExplainArgs) -> Result<()> {
     Ok(())
 }
 
-/// Find the most recent `/tmp/holocron-*.json` by filename
+/// Find the most recent `<target>/.holocron/reports/*.json` by filename
 /// (lexicographic — the timestamps in the filename sort naturally).
-fn latest_audit_json() -> Result<PathBuf> {
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir("/tmp")
-        .context("reading /tmp")?
+fn latest_audit_json(target: &Path) -> Result<PathBuf> {
+    let dir = target.join(REPORTS_SUBDIR);
+    let read_dir = std::fs::read_dir(&dir).with_context(|| {
+        format!(
+            "no `.holocron/reports/` directory at {} — run `holocron audit <path>` first, \
+             or pass --from <path>",
+            target.display(),
+        )
+    })?;
+    let mut candidates: Vec<PathBuf> = read_dir
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| {
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-                return false;
-            };
-            name.starts_with("holocron-")
-                && std::path::Path::new(name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-        })
+        .filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")))
         .collect();
     candidates.sort();
     candidates.pop().ok_or_else(|| {
         anyhow::anyhow!(
-            "no /tmp/holocron-*.json sidecar found — run `holocron audit <path>` first, \
-             or pass --from <path>"
+            "no JSON sidecars found in {} — run `holocron audit <path>` first, \
+             or pass --from <path>",
+            dir.display()
         )
     })
 }
@@ -748,6 +766,14 @@ fn warn_if_weights_skewed(weights: &[(Category, f64); 5]) {
 /// SARIF sidecar (if `--sarif`), and HTML sidecar (if `--html`).
 /// Returns the paths written.
 fn write_reports(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<WrittenPaths> {
+    // Reports land under `<target>/.holocron/reports/<ts>.{ext}` by
+    // default (#bug fix). When the user passes --output, they pick
+    // the exact location and the dir gets created on demand below
+    // via the parent's `create_dir_all`. Otherwise, ensure the
+    // default reports dir exists once up-front.
+    if args.output.is_none() {
+        ensure_reports_dir(target)?;
+    }
     let md = write_markdown(report, target, args)?;
     let json = write_json(report, target, args)?;
     let sarif = write_sarif_sidecar(report, target, args)?;
@@ -880,12 +906,25 @@ fn resolve_target(input: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Subdirectory under the target project where reports are written.
+/// `<target>/.holocron/reports/<ts>.{md,json,sarif,html}`.
+/// Hidden so it doesn't clutter `ls`; gitignore as `.holocron/`.
+const REPORTS_SUBDIR: &str = ".holocron/reports";
+
+/// Resolve the directory reports go into for `target`. Creates it on
+/// demand so callers can just `write` after this returns. Lives under
+/// the audited project (not `/tmp`) so audit artefacts travel with
+/// the code under review and survive `tmpwatch`/reboots.
+fn ensure_reports_dir(target: &Path) -> Result<PathBuf> {
+    let dir = target.join(REPORTS_SUBDIR);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating reports directory {}", dir.display()))?;
+    Ok(dir)
+}
+
 fn default_report_path(target: &Path, ext: &str) -> PathBuf {
-    let slug = target
-        .file_name()
-        .map_or_else(|| "project".to_string(), |n| n.to_string_lossy().into_owned());
     let ts = chrono::Utc::now().timestamp();
-    PathBuf::from(format!("/tmp/holocron-{slug}-{ts}.{ext}"))
+    target.join(REPORTS_SUBDIR).join(format!("{ts}.{ext}"))
 }
 
 #[cfg(test)]
@@ -1113,7 +1152,11 @@ mod tests {
     fn explain_resolves_fingerprint_via_explicit_from() {
         let d = TempDir::new().unwrap();
         let path = write_sidecar(&d);
-        let args = ExplainArgs { fingerprint: "a1b2c3d4e5f60718".to_string(), from: Some(path) };
+        let args = ExplainArgs {
+            fingerprint: "a1b2c3d4e5f60718".to_string(),
+            from: Some(path),
+            target: PathBuf::from("."),
+        };
         // Should not error.
         explain(&args).unwrap();
     }
@@ -1122,7 +1165,11 @@ mod tests {
     fn explain_errors_on_unknown_fingerprint() {
         let d = TempDir::new().unwrap();
         let path = write_sidecar(&d);
-        let args = ExplainArgs { fingerprint: "0000000000000000".to_string(), from: Some(path) };
+        let args = ExplainArgs {
+            fingerprint: "0000000000000000".to_string(),
+            from: Some(path),
+            target: PathBuf::from("."),
+        };
         let err = explain(&args).unwrap_err();
         assert!(err.to_string().contains("no finding matched"), "got: {err}");
     }
@@ -1132,11 +1179,53 @@ mod tests {
         let args = ExplainArgs {
             fingerprint: "deadbeef".to_string(),
             from: Some(PathBuf::from("/tmp/this-sidecar-does-not-exist-12345.json")),
+            target: PathBuf::from("."),
         };
         let err = explain(&args).unwrap_err();
         assert!(
             err.to_string().contains("reading sidecar") || err.to_string().contains("No such"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn explain_auto_discovers_latest_sidecar_in_reports_dir() {
+        // When --from is omitted, explain() walks up from --target
+        // looking for `Cargo.toml`, then scans `.holocron/reports/*.json`
+        // for the lexicographically-greatest file (timestamps in the
+        // filename sort naturally).
+        let d = TempDir::new().unwrap();
+        // Make a fake project root with a Cargo.toml so resolve_target works.
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let reports = d.path().join(REPORTS_SUBDIR);
+        std::fs::create_dir_all(&reports).unwrap();
+        // Two sidecars; the later timestamp must win.
+        std::fs::write(reports.join("1000.json"), sample_sidecar()).unwrap();
+        std::fs::write(reports.join("9999.json"), sample_sidecar()).unwrap();
+        let args = ExplainArgs {
+            fingerprint: "a1b2c3d4e5f60718".to_string(),
+            from: None,
+            target: d.path().to_path_buf(),
+        };
+        explain(&args).unwrap();
+    }
+
+    #[test]
+    fn explain_errors_helpfully_when_no_reports_dir_exists() {
+        // Project has a Cargo.toml but no `.holocron/reports/` yet —
+        // the user hasn't run an audit. Error must tell them so.
+        let d = TempDir::new().unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let args = ExplainArgs {
+            fingerprint: "anything".to_string(),
+            from: None,
+            target: d.path().to_path_buf(),
+        };
+        let err = explain(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(".holocron/reports") || msg.contains("run `holocron audit"),
+            "error must point user at `holocron audit` and/or the reports dir: {msg}"
         );
     }
 
