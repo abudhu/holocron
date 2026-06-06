@@ -47,21 +47,34 @@ impl Auditor for RustSecAuditor {
             .current_dir(target)
             .args(["audit", "--json"])
             .stdin(Stdio::null())
+            .stderr(Stdio::piped())
             .output()
             .await?;
 
         // cargo-audit exits non-zero (1) when it finds vulns. That's
         // not a failure for us — we still parse the JSON.
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         let report: AuditReport = match serde_json::from_str(&stdout) {
             Ok(r) => r,
             Err(e) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("failed to parse cargo-audit JSON: {e}; stderr: {stderr}");
             }
         };
 
-        Ok(report_to_findings(&report))
+        let findings = report_to_findings(&report);
+        // #39: guard against the silent-failure shape — cargo-audit
+        // produced parseable but empty JSON while internally hitting
+        // an advisory-db fetch error (network down, GitHub rate-limited,
+        // stale cache, container-fs read-only). Treat the run as Failed
+        // so the grader marks Security as Skipped instead of A+.
+        crate::runners::check_singleshot_completeness(
+            "cargo-audit",
+            output.status.success(),
+            findings.len(),
+            &stderr,
+        )?;
+        Ok(findings)
     }
 }
 

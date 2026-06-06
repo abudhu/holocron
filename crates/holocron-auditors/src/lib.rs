@@ -9,6 +9,7 @@ pub mod geiger;
 pub mod machete;
 pub mod mutants;
 pub mod outdated;
+pub mod runners;
 pub mod rust_code_analysis;
 pub mod rustsec;
 

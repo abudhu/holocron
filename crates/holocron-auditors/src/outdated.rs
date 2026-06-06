@@ -52,7 +52,19 @@ impl Auditor for OutdatedAuditor {
             .await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_outdated_stream(&stdout))
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let findings = parse_outdated_stream(&stdout);
+        // #39: guard against the silent-failure shape — cargo-outdated
+        // crashed (network unreachable, cargo-version mismatch like the
+        // geiger #38 case, registry timeout) and we have no findings to
+        // report. Treat as Failed so Maintenance is Skipped, not A+.
+        crate::runners::check_singleshot_completeness(
+            "cargo-outdated",
+            output.status.success(),
+            findings.len(),
+            &stderr,
+        )?;
+        Ok(findings)
     }
 }
 

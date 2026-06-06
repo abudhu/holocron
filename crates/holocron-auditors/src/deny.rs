@@ -56,10 +56,9 @@ impl Auditor for DenyAuditor {
 
         let output = Command::new("cargo")
             .current_dir(target)
-            .args(["deny", "--format=json"])
+            .args(["deny", "--format=json", "check"])
             .arg("--config")
             .arg(&config_path)
-            .arg("check")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -72,7 +71,18 @@ impl Auditor for DenyAuditor {
         // Diagnostics are written to stderr in JSON-line form; summary
         // ("advisories ok, bans FAILED, ...") goes to stderr too.
         let combined = format!("{stdout}\n{stderr}");
-        Ok(parse_deny_stream(&combined))
+        let findings = parse_deny_stream(&combined);
+        // #39: guard against the silent-failure shape — cargo-deny
+        // crashed (config malformed, registry unreachable, internal
+        // panic) without producing any diagnostic JSON we could parse.
+        // Treat as Failed so Maintenance is Skipped instead of A+.
+        crate::runners::check_singleshot_completeness(
+            "cargo-deny",
+            output.status.success(),
+            findings.len(),
+            &stderr,
+        )?;
+        Ok(findings)
     }
 }
 
