@@ -277,10 +277,9 @@ struct MetricGroup {
     sum: f64,
 }
 
-// Allow conversion from FileMetrics → Space for the top-level walk so
-// we can reuse `walk_spaces`. We treat the file root as a synthetic space.
+// Convert FileMetrics → Space for the top-level walk so we can reuse
+// `walk_spaces`. We treat the file root as a synthetic space.
 impl FileMetrics {
-    #[allow(dead_code)]
     fn as_space(&self) -> Space {
         Space {
             name: Some(self.name.clone()),

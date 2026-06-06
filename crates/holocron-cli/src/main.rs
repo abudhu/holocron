@@ -71,39 +71,59 @@ async fn audit(args: AuditArgs) -> Result<()> {
     info!(target = %target.display(), "starting audit");
     println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
 
-    let auditors = default_set();
-    let mut runner = Runner::new(&target)
-        .with_timeout(Duration::from_secs(args.timeout))
-        .with_install_missing(args.install_missing);
-    for a in auditors {
-        runner = runner.with_auditor(a);
-    }
-
-    let outcome = runner.run().await.context("running auditors")?;
+    let outcome = build_runner(&target, &args).run().await.context("running auditors")?;
     let grade = Grade::new(&outcome.auditor_results).compute();
     let report = Report::new(&outcome, &grade);
 
-    // Render Markdown.
-    let md_path = args.output.clone().unwrap_or_else(|| default_report_path(&target, "md"));
-    let md = render_markdown(&report);
+    let (md_path, json_path) = write_reports(&report, &target, &args)?;
+    print_summary(&grade, &md_path, json_path.as_deref());
+
+    Ok(())
+}
+
+/// Construct the [`Runner`] with the default auditor set and CLI flags applied.
+fn build_runner(target: &Path, args: &AuditArgs) -> Runner {
+    let mut runner = Runner::new(target)
+        .with_timeout(Duration::from_secs(args.timeout))
+        .with_install_missing(args.install_missing);
+    for a in default_set() {
+        runner = runner.with_auditor(a);
+    }
+    runner
+}
+
+/// Render the Markdown report (always) and JSON sidecar (unless `--no-json`).
+/// Returns the paths written. Either is rooted at `--output` if set, otherwise
+/// at `/tmp/holocron-<slug>-<ts>.{md,json}`.
+fn write_reports(
+    report: &Report<'_>,
+    target: &Path,
+    args: &AuditArgs,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    let md_path = args.output.clone().unwrap_or_else(|| default_report_path(target, "md"));
+    let md = render_markdown(report);
     std::fs::write(&md_path, &md)
         .with_context(|| format!("writing markdown report to {}", md_path.display()))?;
 
-    // Render JSON sidecar.
     let json_path = if args.no_json {
         None
     } else {
         let p = args
             .output
             .as_ref()
-            .map_or_else(|| default_report_path(&target, "json"), |o| o.with_extension("json"));
-        let json = render_json(&report).context("serializing JSON sidecar")?;
+            .map_or_else(|| default_report_path(target, "json"), |o| o.with_extension("json"));
+        let json = render_json(report).context("serializing JSON sidecar")?;
         std::fs::write(&p, json)
             .with_context(|| format!("writing JSON sidecar to {}", p.display()))?;
         Some(p)
     };
 
-    // Console summary.
+    Ok((md_path, json_path))
+}
+
+/// Print the final grade card to stdout. Matches the layout users expect from
+/// every Holocron run.
+fn print_summary(grade: &holocron_core::GradeReport, md_path: &Path, json_path: Option<&Path>) {
     println!();
     println!("===============================================");
     println!("  Grade: {}  ({:.2})", grade.overall_letter, grade.overall_score);
@@ -118,12 +138,10 @@ async fn audit(args: AuditArgs) -> Result<()> {
     }
     println!();
     println!("  Markdown report: {}", md_path.display());
-    if let Some(jp) = &json_path {
+    if let Some(jp) = json_path {
         println!("  JSON sidecar:    {}", jp.display());
     }
     println!("===============================================");
-
-    Ok(())
 }
 
 fn resolve_target(input: &Path) -> Result<PathBuf> {

@@ -19,18 +19,20 @@ module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 
 [dependencies]
+# Used: error types in Auditor trait + Runner + Grade math
 anyhow.workspace = true
-thiserror.workspace = true
 async-trait.workspace = true
+# Used: Finding/Grade serialize for JSON sidecar, deserialize for tests
 serde.workspace = true
-serde_json.workspace = true
+# Used: stable Finding fingerprint hashing
 sha2.workspace = true
 hex.workspace = true
+# Used: ReportHeader timestamps + grade serde
 chrono.workspace = true
+# Used: Runner spawns auditors via tokio::JoinSet
 tokio.workspace = true
+# Used: structured logs in runner.rs
 tracing.workspace = true
-cargo_metadata.workspace = true
-which = "8"
 
 [dev-dependencies]
 tempfile = "3"
