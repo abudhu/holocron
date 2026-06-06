@@ -146,15 +146,126 @@ pub struct WeightsConfig {
     pub maintenance: Option<f64>,
 }
 
-/// `[[allowlist]]` — placeholder for #29.
+/// `[[allowlist]]` — suppress specific findings by fingerprint, auditor,
+/// code, message prefix, and/or file path (#29).
+///
+/// A finding is allowlisted when EVERY specified field matches it.
+/// At least one match field must be set (a completely empty entry
+/// would otherwise suppress all findings — the loader rejects those
+/// at validation time). `reason` is for human/audit purposes and is
+/// echoed back in the report's "Allowlisted Findings" section.
+///
+/// Path matching is a simple substring check (case-sensitive) — full
+/// glob support can come later if there's demand. Substring is enough
+/// for the common case ("crates/holocron-core/src/grade.rs").
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AllowlistEntry {
+    /// 16-char hex fingerprint copied from `holocron explain` output or
+    /// the JSON sidecar. Most precise way to suppress a single finding.
     pub fingerprint: Option<String>,
+    /// Auditor tool name, e.g. "clippy", "cargo-audit", "rust-code-analysis".
     pub auditor: Option<String>,
+    /// Lint/rule code, e.g. `clippy::missing_errors_doc`,
+    /// `RUSTSEC-2024-0001`, `complexity-warn`.
     pub code: Option<String>,
+    /// Message must START WITH this string (case-sensitive). Useful for
+    /// catch-all clippy lints with parameterized messages.
     pub message_prefix: Option<String>,
+    /// File path must CONTAIN this substring (case-sensitive). E.g.
+    /// `path = "crates/holocron-core/src/grade.rs"` or
+    /// `path = "tests/"` to allowlist a whole directory.
+    pub path: Option<String>,
+    /// Required human-readable rationale. Echoed in the report.
     pub reason: Option<String>,
+}
+
+impl AllowlistEntry {
+    /// Returns true when this entry has no match fields set (would
+    /// suppress everything). Loader-time validation rejects such entries.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.fingerprint.is_none()
+            && self.auditor.is_none()
+            && self.code.is_none()
+            && self.message_prefix.is_none()
+            && self.path.is_none()
+    }
+
+    /// Does this rule match the given finding? Match semantic: AND
+    /// across every specified field. An entry with only `auditor =
+    /// "clippy"` matches any clippy finding; an entry with both
+    /// `auditor = "clippy"` and `code = "clippy::unwrap_used"` matches
+    /// only clippy `unwrap_used` findings; etc.
+    #[must_use]
+    pub fn matches(&self, f: &crate::Finding) -> bool {
+        match_fingerprint(self.fingerprint.as_deref(), &f.fingerprint)
+            && match_auditor(self.auditor.as_deref(), &f.auditor)
+            && match_code(self.code.as_deref(), f.code.as_deref())
+            && match_message_prefix(self.message_prefix.as_deref(), &f.message)
+            && match_path(self.path.as_deref(), f.location.as_ref())
+    }
+}
+
+// ── per-field match helpers ────────────────────────────────────────
+// Each returns true when the rule's field passes (either unset, or
+// set and matching the finding's value). Extracted from
+// `AllowlistEntry::matches` to keep its cyclomatic complexity below
+// threshold (#29 path / fix for the regression #29 introduced).
+
+fn match_fingerprint(rule: Option<&str>, finding: &str) -> bool {
+    rule.is_none_or(|fp| fp == finding)
+}
+
+fn match_auditor(rule: Option<&str>, finding: &str) -> bool {
+    rule.is_none_or(|a| a == finding)
+}
+
+fn match_code(rule: Option<&str>, finding: Option<&str>) -> bool {
+    // Exact match against the optional code field. None on either
+    // side when the rule specifies one means no match (you can't
+    // allowlist by code a finding that has no code).
+    rule.is_none_or(|c| finding == Some(c))
+}
+
+fn match_message_prefix(rule: Option<&str>, finding: &str) -> bool {
+    rule.is_none_or(|mp| finding.starts_with(mp))
+}
+
+fn match_path(rule: Option<&str>, finding: Option<&crate::Location>) -> bool {
+    // Substring against the location's file path. None on either side
+    // when the rule specifies one means no match — intentional, prevents
+    // accidental suppression of project-wide CVE findings.
+    rule.is_none_or(|p| finding.is_some_and(|loc| loc.file.to_string_lossy().contains(p)))
+}
+
+/// Apply allowlist rules to a set of findings in place.
+///
+/// Each finding is marked `allowlisted = true` and gets `allowlist_reason`
+/// populated with the matching rule's `reason` (or a default explanation
+/// when the rule omitted one). Findings already allowlisted by an earlier
+/// rule are skipped — first match wins, so listing more specific rules
+/// first preserves their reasons.
+///
+/// Returns the count of findings that were newly allowlisted.
+pub fn apply_allowlist(findings: &mut [crate::Finding], rules: &[AllowlistEntry]) -> usize {
+    let mut count = 0_usize;
+    for finding in findings.iter_mut() {
+        if finding.allowlisted {
+            continue;
+        }
+        for rule in rules {
+            if rule.matches(finding) {
+                finding.allowlisted = true;
+                finding.allowlist_reason = Some(
+                    rule.reason.clone().unwrap_or_else(|| "matched [[allowlist]] rule".to_string()),
+                );
+                count += 1;
+                break;
+            }
+        }
+    }
+    count
 }
 
 impl HolocronConfig {
@@ -187,6 +298,18 @@ impl HolocronConfig {
         cfg.gate
             .fail_below_letter()
             .map_err(|e| anyhow::anyhow!("invalid [gate] in {}: {e}", path.display()))?;
+        // Validate allowlist: every entry needs at least one match
+        // field (#29). An empty entry would suppress every finding.
+        for (i, entry) in cfg.allowlist.iter().enumerate() {
+            if entry.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "invalid [[allowlist]] entry #{} in {}: at least one of \
+                     fingerprint, auditor, code, message_prefix, or path must be set",
+                    i + 1,
+                    path.display()
+                ));
+            }
+        }
         Ok((cfg, Some(path)))
     }
 }
@@ -209,6 +332,7 @@ fn find_rc(start: &Path) -> Option<PathBuf> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::{Category, Finding, Location, Severity};
     use tempfile::TempDir;
 
     fn write_rc(dir: &Path, body: &str) -> PathBuf {
@@ -381,5 +505,148 @@ mod tests {
         assert_eq!(cfg.gate.fail_below_letter().unwrap(), Some(Letter::AMinus));
         assert_eq!(cfg.complexity.cyclomatic_medium, Some(15));
         assert_eq!(cfg.weights.maintenance, Some(0.15));
+    }
+
+    // ─── #29 allowlist tests ──────────────────────────────────────
+
+    fn finding_for_test(
+        auditor: &str,
+        code: Option<&str>,
+        msg: &str,
+        path: Option<&str>,
+    ) -> Finding {
+        let mut f = Finding::new(auditor, Category::Lints, Severity::Medium, msg);
+        if let Some(c) = code {
+            f = f.with_code(c);
+        }
+        if let Some(p) = path {
+            f = f.with_location(Location::at(p, 1));
+        }
+        f
+    }
+
+    #[test]
+    fn allowlist_empty_entry_rejected_at_load() {
+        let d = TempDir::new().unwrap();
+        write_rc(d.path(), "[[allowlist]]\nreason = \"oops, no match fields\"\n");
+        let err = HolocronConfig::load_from(d.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("at least one of"), "got: {msg}");
+        assert!(msg.contains("allowlist"));
+    }
+
+    #[test]
+    fn allowlist_loads_with_one_field_set() {
+        let d = TempDir::new().unwrap();
+        write_rc(d.path(), "[[allowlist]]\nauditor = \"clippy\"\nreason = \"intentional\"\n");
+        let (cfg, _) = HolocronConfig::load_from(d.path()).unwrap();
+        assert_eq!(cfg.allowlist.len(), 1);
+        assert_eq!(cfg.allowlist[0].auditor.as_deref(), Some("clippy"));
+    }
+
+    #[test]
+    fn matches_by_auditor_alone() {
+        let rule =
+            AllowlistEntry { auditor: Some("clippy".to_string()), ..AllowlistEntry::default() };
+        let f = finding_for_test("clippy", Some("clippy::unwrap_used"), "x", None);
+        assert!(rule.matches(&f));
+        let f2 = finding_for_test("cargo-audit", None, "x", None);
+        assert!(!rule.matches(&f2));
+    }
+
+    #[test]
+    fn matches_by_code_alone() {
+        let rule = AllowlistEntry {
+            code: Some("complexity-warn".to_string()),
+            ..AllowlistEntry::default()
+        };
+        let f = finding_for_test("rust-code-analysis", Some("complexity-warn"), "x", None);
+        assert!(rule.matches(&f));
+        let f2 = finding_for_test("clippy", Some("clippy::unwrap_used"), "x", None);
+        assert!(!rule.matches(&f2));
+    }
+
+    #[test]
+    fn matches_requires_all_specified_fields() {
+        // auditor + code both set -> only finding matching BOTH passes.
+        let rule = AllowlistEntry {
+            auditor: Some("clippy".to_string()),
+            code: Some("clippy::unwrap_used".to_string()),
+            ..AllowlistEntry::default()
+        };
+        let f_match = finding_for_test("clippy", Some("clippy::unwrap_used"), "x", None);
+        let f_wrong_code = finding_for_test("clippy", Some("clippy::expect_used"), "x", None);
+        let f_wrong_aud =
+            finding_for_test("rust-code-analysis", Some("clippy::unwrap_used"), "x", None);
+        assert!(rule.matches(&f_match));
+        assert!(!rule.matches(&f_wrong_code));
+        assert!(!rule.matches(&f_wrong_aud));
+    }
+
+    #[test]
+    fn matches_path_substring() {
+        let rule = AllowlistEntry { path: Some("tests/".to_string()), ..AllowlistEntry::default() };
+        let f_in = finding_for_test("clippy", None, "x", Some("crates/foo/tests/it.rs"));
+        let f_out = finding_for_test("clippy", None, "x", Some("crates/foo/src/lib.rs"));
+        let f_noloc = finding_for_test("clippy", None, "x", None);
+        assert!(rule.matches(&f_in));
+        assert!(!rule.matches(&f_out));
+        // Path rule against a finding with no location => no match.
+        assert!(!rule.matches(&f_noloc));
+    }
+
+    #[test]
+    fn apply_allowlist_marks_matched_and_returns_count() {
+        let mut findings = vec![
+            finding_for_test("clippy", Some("clippy::unwrap_used"), "msg1", Some("src/a.rs")),
+            finding_for_test("clippy", Some("clippy::expect_used"), "msg2", Some("src/b.rs")),
+            finding_for_test("cargo-audit", Some("RUSTSEC-2024-0001"), "vuln", None),
+        ];
+        let rules = vec![AllowlistEntry {
+            auditor: Some("clippy".to_string()),
+            code: Some("clippy::unwrap_used".to_string()),
+            reason: Some("intentional in this module".to_string()),
+            ..AllowlistEntry::default()
+        }];
+        let count = apply_allowlist(&mut findings, &rules);
+        assert_eq!(count, 1);
+        assert!(findings[0].allowlisted);
+        assert_eq!(findings[0].allowlist_reason.as_deref(), Some("intentional in this module"));
+        assert!(!findings[1].allowlisted);
+        assert!(!findings[2].allowlisted);
+    }
+
+    #[test]
+    fn apply_allowlist_first_match_wins() {
+        // Two rules both match the same finding; first wins, second
+        // never fires (no count, no reason override).
+        let mut findings =
+            vec![finding_for_test("clippy", Some("clippy::unwrap_used"), "msg", None)];
+        let rules = vec![
+            AllowlistEntry {
+                auditor: Some("clippy".to_string()),
+                reason: Some("first rule".to_string()),
+                ..AllowlistEntry::default()
+            },
+            AllowlistEntry {
+                code: Some("clippy::unwrap_used".to_string()),
+                reason: Some("second rule".to_string()),
+                ..AllowlistEntry::default()
+            },
+        ];
+        let count = apply_allowlist(&mut findings, &rules);
+        assert_eq!(count, 1);
+        assert_eq!(findings[0].allowlist_reason.as_deref(), Some("first rule"));
+    }
+
+    #[test]
+    fn apply_allowlist_default_reason_when_rule_omits_it() {
+        let mut findings = vec![finding_for_test("clippy", None, "msg", None)];
+        let rules = vec![AllowlistEntry {
+            auditor: Some("clippy".to_string()),
+            ..AllowlistEntry::default()
+        }];
+        apply_allowlist(&mut findings, &rules);
+        assert_eq!(findings[0].allowlist_reason.as_deref(), Some("matched [[allowlist]] rule"));
     }
 }

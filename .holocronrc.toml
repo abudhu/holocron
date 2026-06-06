@@ -1,0 +1,5 @@
+[[allowlist]]
+auditor = "rust-code-analysis"
+code = "complexity-warn"
+path = "crates/holocron-core/src/grade.rs"
+reason = "Letter::from_str is a 13-arm dispatch table by design (one arm per grade letter A+ through F). Splitting it adds indirection without reducing the essential complexity of the mapping."

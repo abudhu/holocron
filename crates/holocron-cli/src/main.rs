@@ -379,7 +379,7 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     // Set up the progress display (#36). For Off mode we skip the sink
     // entirely so we don't pay for an unused channel/task. Both branches
     // produce a `RunOutcome` so the rest of audit() is mode-agnostic.
-    let outcome = if let Some(mode) = progress::resolve_mode(args.progress) {
+    let mut outcome = if let Some(mode) = progress::resolve_mode(args.progress) {
         let (sink, handle) = progress::spawn_display(mode, enabled.len());
         let runner = build_runner(&target, &args, enabled).with_progress(sink.clone());
         // sink moves into the runner via with_progress; drop our copy
@@ -404,6 +404,22 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     // because `Grade::compute` renormalizes — see the with_weights doc).
     let weights = merge_weights(&rc.weights);
     warn_if_weights_skewed(&weights);
+
+    // #29: apply [[allowlist]] rules before grading. Allowlisted
+    // findings still appear in the report but are excluded from the
+    // grade math. Mutate each AuditorResult.findings in place.
+    let allowlisted_count: usize = outcome
+        .auditor_results
+        .iter_mut()
+        .map(|r| holocron_core::apply_allowlist(&mut r.findings, &rc.allowlist))
+        .sum();
+    if allowlisted_count > 0 {
+        println!(
+            "Allowlist: {allowlisted_count} finding{} suppressed from grade",
+            if allowlisted_count == 1 { "" } else { "s" }
+        );
+    }
+
     let grade = Grade::new(&outcome.auditor_results).with_weights(weights).compute();
     let report = Report::new(&outcome, &grade);
 

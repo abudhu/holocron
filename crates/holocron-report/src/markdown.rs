@@ -17,7 +17,41 @@ pub fn render_markdown(report: &Report<'_>) -> String {
     for cat in Category::ALL {
         write_category_section(report, cat, &mut out);
     }
+    write_allowlisted_section(report, &mut out);
     out
+}
+
+/// Render the "Allowlisted Findings" section listing every finding the
+/// rc rules suppressed from the grade, with the matching rule's reason.
+/// Skipped entirely when no findings were allowlisted (#29).
+fn write_allowlisted_section(report: &Report<'_>, out: &mut String) {
+    let allow: Vec<&Finding> = report.findings.iter().filter(|f| f.allowlisted).collect();
+    if allow.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "## Allowlisted Findings ({})", allow.len());
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "These findings matched an `[[allowlist]]` rule in `.holocronrc.toml` \
+         and were excluded from the category scores and overall grade. They \
+         are listed here for audit-trail purposes."
+    );
+    let _ = writeln!(out);
+    for f in allow {
+        let location = f.location.as_ref().map(|l| format!(" `{l}`")).unwrap_or_default();
+        let code = f.code.as_deref().map(|c| format!(" `{c}`")).unwrap_or_default();
+        let reason = f.allowlist_reason.as_deref().unwrap_or("(no reason given)");
+        let _ = writeln!(
+            out,
+            "- **{}** [{}]{location} —{code} {}",
+            f.severity,
+            f.category,
+            escape_md(&f.message)
+        );
+        let _ = writeln!(out, "  > Reason: {}", escape_md(reason));
+    }
+    let _ = writeln!(out);
 }
 
 fn write_header(report: &Report<'_>, out: &mut String) {
@@ -148,7 +182,11 @@ fn write_auditor_status(report: &Report<'_>, out: &mut String) {
 }
 
 fn write_category_section(report: &Report<'_>, category: Category, out: &mut String) {
-    let in_cat: Vec<&Finding> = report.findings.iter().filter(|f| f.category == category).collect();
+    // #29: allowlisted findings get their own section at the end of
+    // the report — filter them out of the per-category lists so users
+    // see only what actually affected the grade.
+    let in_cat: Vec<&Finding> =
+        report.findings.iter().filter(|f| f.category == category && !f.allowlisted).collect();
     let _ = writeln!(out, "## {category}");
     let _ = writeln!(out);
 

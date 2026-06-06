@@ -296,8 +296,12 @@ impl<'a> Grade<'a> {
             .flat_map(|r| r.findings.iter())
             .filter(|f| f.category == category)
             .collect();
-        let finding_count = findings.len();
-        let penalty: f64 = findings.iter().map(|f| f.severity.weight()).sum();
+        // #29: allowlisted findings still surface in the report but
+        // don't affect the grade. Filter them out of both the count
+        // and the penalty.
+        let active: Vec<_> = findings.iter().filter(|f| !f.allowlisted).copied().collect();
+        let finding_count = active.len();
+        let penalty: f64 = active.iter().map(|f| f.severity.weight()).sum();
         let score = (1.0 - penalty).max(0.0);
 
         CategoryScore::Graded { category, score, letter: Letter::from_score(score), finding_count }

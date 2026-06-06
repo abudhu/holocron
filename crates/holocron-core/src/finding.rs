@@ -166,6 +166,18 @@ pub struct Finding {
     pub location: Option<Location>,
     /// Stable hash for cross-run dedup. See [`Finding::compute_fingerprint`].
     pub fingerprint: String,
+    /// True when an `[[allowlist]]` rule in `.holocronrc.toml` matches
+    /// this finding (#29). Allowlisted findings still appear in the
+    /// report (under their own section, with the reason) but are
+    /// EXCLUDED from category scores and the overall grade.
+    /// Defaults to `false` — older JSON sidecars (schema v1) parse
+    /// cleanly because `#[serde(default)]` fills in the absence.
+    #[serde(default)]
+    pub allowlisted: bool,
+    /// Human-readable rationale from the rc rule that matched. None
+    /// when not allowlisted, or when the rule omitted `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist_reason: Option<String>,
 }
 
 impl Finding {
@@ -190,6 +202,8 @@ impl Finding {
             detail: None,
             location: None,
             fingerprint,
+            allowlisted: false,
+            allowlist_reason: None,
         }
     }
 

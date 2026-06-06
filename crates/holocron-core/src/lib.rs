@@ -17,7 +17,8 @@ pub mod runner;
 
 pub use auditor::{Auditor, AuditorMeta, AuditorResult, RunStatus};
 pub use config::{
-    AllowlistEntry, AuditorsConfig, ComplexityConfig, GateConfig, HolocronConfig, WeightsConfig,
+    apply_allowlist, AllowlistEntry, AuditorsConfig, ComplexityConfig, GateConfig, HolocronConfig,
+    WeightsConfig,
 };
 pub use finding::{Category, Finding, Location, Severity};
 pub use grade::{CategoryScore, Grade, GradeReport, Letter};
