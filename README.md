@@ -38,7 +38,7 @@ rustup component add clippy
 holocron audit ~/Git/my-rust-project
 ```
 
-You get a live progress display on stderr while auditors run, a grade card on stdout when they finish, a Markdown report at `<project>/.holocron/reports/<ts>.md`, and a JSON sidecar at the same path with `.json`. Reports live inside the project (not `/tmp`) so they travel with the code under review and survive reboots / tmpwatch.
+You get a live progress display on stderr while auditors run, a grade card on stdout when they finish, a Markdown report at `<project>/.holocron/reports/<ts>.md`, and a JSON sidecar at the same path with `.json`. 
 
 Want more? `--html` gives you a self-contained dark-themed HTML page for sharing. `--sarif` gives you GitHub Code Scanning-ready output.
 
