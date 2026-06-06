@@ -1,7 +1,7 @@
 //! Markdown report renderer.
 
 use crate::Report;
-use holocron_core::{Category, Finding, RunStatus, Severity};
+use holocron_core::{Category, CategoryScore, Finding, RunStatus, Severity};
 use std::fmt::Write;
 
 const MAX_FINDINGS_PER_CATEGORY: usize = 50;
@@ -50,19 +50,49 @@ fn write_grade_card(report: &Report<'_>, out: &mut String) {
 }
 
 fn write_summary_table(report: &Report<'_>, out: &mut String) {
-    let _ = writeln!(out, "| Category    | Grade | Score | Findings |");
-    let _ = writeln!(out, "|-------------|-------|-------|----------|");
+    let _ = writeln!(out, "| Category    | Grade | Score | Findings | Status                |");
+    let _ = writeln!(out, "|-------------|-------|-------|----------|-----------------------|");
     for cs in &report.grade.by_category {
-        let _ = writeln!(
-            out,
-            "| {:<11} | {:<5} | {:>5.2} | {:>8} |",
-            cs.category.to_string(),
-            cs.letter.to_string(),
-            cs.score,
-            cs.finding_count,
-        );
+        match cs {
+            CategoryScore::Graded { category, score, letter, finding_count } => {
+                let _ = writeln!(
+                    out,
+                    "| {:<11} | {:<5} | {:>5.2} | {:>8} | ok                    |",
+                    category.to_string(),
+                    letter.to_string(),
+                    score,
+                    finding_count,
+                );
+            }
+            CategoryScore::Skipped { category, reason } => {
+                // Keep the reason short for the table cell; full text
+                // appears in the Auditor Errors section below.
+                let short_reason = if reason.len() > 40 {
+                    format!("{}…", &reason[..40])
+                } else {
+                    reason.clone()
+                };
+                let _ = writeln!(
+                    out,
+                    "| {:<11} | —     |   —   |        — | _skipped: {}_ |",
+                    category.to_string(),
+                    escape_md(&short_reason),
+                );
+            }
+        }
     }
     let _ = writeln!(out);
+
+    if report.grade.any_skipped() {
+        let _ = writeln!(
+            out,
+            "> ⚠️  One or more categories were skipped because their auditor failed, \
+             timed out, or wasn't installed. The overall grade was computed over the \
+             remaining categories only — treat it as advisory until the skipped \
+             auditors run cleanly. See the Auditor Errors section below for detail."
+        );
+        let _ = writeln!(out);
+    }
 }
 
 fn write_auditor_status(report: &Report<'_>, out: &mut String) {
@@ -226,5 +256,47 @@ mod tests {
         let report = Report::new(&outcome, &grade);
         let md = render_markdown(&report);
         assert!(md.contains("_No findings._"));
+    }
+
+    #[test]
+    fn skipped_category_renders_em_dash_not_fallback_score() {
+        // #24: when cargo-audit fails, the summary table must show the
+        // Security row as Skipped (em-dash for grade/score) — NOT the
+        // old `B 0.85` fallback.
+        let outcome = RunOutcome {
+            target: std::path::PathBuf::from("/tmp/proj"),
+            started_at: chrono::Utc::now(),
+            total_duration: Duration::ZERO,
+            auditor_results: vec![AuditorResult::failed(
+                holocron_core::auditor::AuditorMeta {
+                    name: "cargo-audit",
+                    category: Category::Security,
+                },
+                "network unreachable: advisory db fetch failed",
+                Duration::from_millis(50),
+            )],
+        };
+        let grade = Grade::new(&outcome.auditor_results).compute();
+        let report = Report::new(&outcome, &grade);
+        let md = render_markdown(&report);
+
+        let security_row = md
+            .lines()
+            .find(|l| l.starts_with("| Security"))
+            .expect("summary table should have a Security row");
+        assert!(
+            security_row.contains('—') || security_row.to_lowercase().contains("skipped"),
+            "expected Skipped marker in Security row, got: {security_row}"
+        );
+        assert!(
+            !security_row.contains("0.85"),
+            "must NOT show the old fallback score, got: {security_row}"
+        );
+        assert!(
+            md.contains("auditor outage")
+                || md.contains("auditors failed")
+                || md.contains("treat it as advisory"),
+            "summary must include a warning banner when any category is skipped"
+        );
     }
 }
