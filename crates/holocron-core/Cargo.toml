@@ -13,9 +13,10 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
-missing_errors_doc = "allow"  # too noisy at v0.1
+missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
 
 [dependencies]
 anyhow.workspace = true
@@ -28,3 +29,8 @@ hex.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+cargo_metadata.workspace = true
+which = "8"
+
+[dev-dependencies]
+tempfile = "3"

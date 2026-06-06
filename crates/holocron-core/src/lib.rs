@@ -1,17 +1,28 @@
 //! Holocron core library.
 //!
-//! v0.1 stub: this crate will host the `Auditor` trait, `Runner`, `Finding`
-//! model, and grade calculator. See `OneDev` issues #3, #8, #9 for the
-//! design landing here.
+//! Hosts the [`Auditor`] trait, the parallel [`Runner`], the [`Finding`]
+//! model, and the [`Grade`] calculator. The CLI in `holocron-cli` is a
+//! thin wrapper that wires these pieces together and renders the
+//! results to Markdown + JSON.
+//!
+//! See `OneDev` issues #3, #8, #9 for the design discussions.
 
 #![doc(html_root_url = "https://onedev.amitbudhu.com/holocron")]
 
-/// Crate version, exposed for the CLI's `--version` output and report headers.
+pub mod auditor;
+pub mod finding;
+pub mod grade;
+pub mod runner;
+
+pub use auditor::{Auditor, AuditorMeta, AuditorResult, RunStatus};
+pub use finding::{Category, Finding, Location, Severity};
+pub use grade::{CategoryScore, Grade, GradeReport, Letter};
+pub use runner::{RunOutcome, Runner};
+
+/// Crate version, exposed for report headers and the CLI's `--version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Placeholder so the crate compiles before #3 lands.
-///
-/// This will be replaced by the real `Auditor` trait + `Runner` in issue #3.
+/// Returns the crate version string.
 #[must_use]
 pub const fn version() -> &'static str {
     VERSION
