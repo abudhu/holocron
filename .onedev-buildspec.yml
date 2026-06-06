@@ -18,6 +18,10 @@ jobs:
     paths:
     - .cargo-home/registry
     - .cargo-home/git
+    # Cache installed cargo binaries (cargo-audit, cargo-machete,
+    # rust-code-analysis-cli) so the first run pays the install cost
+    # once and every subsequent run reuses them.
+    - .cargo-home/bin
     uploadStrategy: UPLOAD_IF_NOT_EXACT_MATCH
     condition: SUCCESSFUL
   # Compiled artefacts. Keyed off Cargo.lock — a lockfile change
@@ -53,6 +57,7 @@ jobs:
         # mounts are actually used.
         export CARGO_HOME="$(pwd)/.cargo-home"
         export CARGO_TARGET_DIR="$(pwd)/target"
+        export PATH="$CARGO_HOME/bin:$PATH"
         mkdir -p "$CARGO_HOME"
 
         echo "=== rustup add rustfmt + clippy ==="
@@ -72,10 +77,40 @@ jobs:
         ./target/release/holocron --version
     useTTY: false
     condition: SUCCESSFUL
+  # Dogfood gate (#20). After Holocron compiles, audit its own source
+  # tree and require an A- or better overall grade. --install-missing
+  # bootstraps any auditor binary not in the cargo bin cache; on a
+  # fresh cache this adds ~5 min for the cargo-audit/machete/RCA
+  # installs, but subsequent runs reuse the cached binaries.
+  #
+  # If this step fails, the change introduced a quality regression
+  # holocron itself can detect. Fix the findings or, if the regression
+  # is intentional, lower the threshold here with the reasoning in the
+  # commit message.
+  - type: CommandStep
+    name: dogfood (holocron audits itself)
+    runInContainer: true
+    image: rust:1.84-bookworm
+    runAs: '0:0'
+    interpreter:
+      type: ShellInterpreter
+      shell: /bin/bash
+      commands: |
+        set -euxo pipefail
+        export CARGO_HOME="$(pwd)/.cargo-home"
+        export CARGO_TARGET_DIR="$(pwd)/target"
+        export PATH="$CARGO_HOME/bin:$PATH"
+
+        echo "=== holocron audits holocron ==="
+        ./target/release/holocron audit . --install-missing --fail-below A-
+    useTTY: false
+    condition: SUCCESSFUL
   triggers:
   - type: BranchUpdateTrigger
     userMatch: anyone
   retryCondition: never
   maxRetries: 0
   retryDelay: 30
-  timeout: 1800
+  # Bumped from 1800 → 3600 to give --install-missing room on a cold
+  # cache (cargo-audit + machete + rust-code-analysis-cli total ~5 min).
+  timeout: 3600

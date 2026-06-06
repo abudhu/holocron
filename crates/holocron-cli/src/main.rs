@@ -4,9 +4,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use holocron_auditors::default_set;
-use holocron_core::{Grade, Runner};
+use holocron_core::{Grade, Letter, Runner};
 use holocron_report::{render_json, render_markdown, Report};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Duration;
 use tracing::info;
 
@@ -48,10 +49,20 @@ struct AuditArgs {
     /// Complexity scans on large projects can take several minutes.
     #[arg(long, default_value_t = 600)]
     timeout: u64,
+
+    /// CI gate: exit with code 1 if the overall grade is below this
+    /// letter. Accepts A+, A, A-, B+, B, B-, C+, C, C-, D+, D, D-, F.
+    /// Unicode minus (`A−`) and ASCII dash (`A-`) both work.
+    ///
+    /// Example: `holocron audit . --fail-below A-` fails on anything
+    /// worse than A−. When omitted, holocron always exits 0 regardless
+    /// of grade (advisory mode).
+    #[arg(long, value_name = "GRADE")]
+    fail_below: Option<Letter>,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,11 +72,17 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Audit(args) => audit(args).await,
+        Command::Audit(args) => match audit(args).await {
+            Ok(exit) => exit,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(2)
+            }
+        },
     }
 }
 
-async fn audit(args: AuditArgs) -> Result<()> {
+async fn audit(args: AuditArgs) -> Result<ExitCode> {
     let target = resolve_target(&args.path)
         .with_context(|| format!("resolving target {}", args.path.display()))?;
     info!(target = %target.display(), "starting audit");
@@ -78,7 +95,21 @@ async fn audit(args: AuditArgs) -> Result<()> {
     let (md_path, json_path) = write_reports(&report, &target, &args)?;
     print_summary(&grade, &md_path, json_path.as_deref());
 
-    Ok(())
+    // CI gate: only enforced when --fail-below is set. Without it, we
+    // always exit 0 so existing scripts that don't expect a gate keep
+    // working.
+    if let Some(threshold) = args.fail_below {
+        if grade.overall_letter < threshold {
+            eprintln!(
+                "\nGATE FAILED: grade {} is below threshold {}",
+                grade.overall_letter, threshold
+            );
+            return Ok(ExitCode::from(1));
+        }
+        println!("Gate passed: {} ≥ {}", grade.overall_letter, threshold);
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Construct the [`Runner`] with the default auditor set and CLI flags applied.

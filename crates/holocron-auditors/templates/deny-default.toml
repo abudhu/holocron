@@ -1,0 +1,51 @@
+# Default cargo-deny configuration shipped by Holocron.
+#
+# Used as a fallback when the audited project has no deny.toml of its
+# own. Mirrors the policy in Holocron's own deny.toml so the dogfood
+# loop stays consistent: any project that adopts holocron's defaults
+# gets the same supply-chain hygiene we hold ourselves to.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+yanked = "warn"
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "0BSD",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path deps appear as wildcards but are pinned via the path.
+# Set publish=false on internal crates and this flag lets them through.
+allow-wildcard-paths = true
+allow = []
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

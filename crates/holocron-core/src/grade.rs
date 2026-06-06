@@ -105,6 +105,37 @@ impl fmt::Display for Letter {
     }
 }
 
+impl std::str::FromStr for Letter {
+    type Err = String;
+
+    /// Parse a letter grade. Accepts both ASCII `-` and the proper Unicode
+    /// minus sign `−` (which is what [`Display`] emits) so users can
+    /// round-trip `--fail-below "$(holocron audit --print-grade)"` without
+    /// shell-escaping worries.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Normalize: trim, collapse the Unicode minus to ASCII '-', uppercase.
+        let normalized = s.trim().replace('\u{2212}', "-").to_ascii_uppercase();
+        match normalized.as_str() {
+            "A+" => Ok(Self::APlus),
+            "A" => Ok(Self::A),
+            "A-" => Ok(Self::AMinus),
+            "B+" => Ok(Self::BPlus),
+            "B" => Ok(Self::B),
+            "B-" => Ok(Self::BMinus),
+            "C+" => Ok(Self::CPlus),
+            "C" => Ok(Self::C),
+            "C-" => Ok(Self::CMinus),
+            "D+" => Ok(Self::DPlus),
+            "D" => Ok(Self::D),
+            "D-" => Ok(Self::DMinus),
+            "F" => Ok(Self::F),
+            other => Err(format!(
+                "unknown grade '{other}' — expected one of A+, A, A-, B+, B, B-, C+, C, C-, D+, D, D-, F"
+            )),
+        }
+    }
+}
+
 /// Per-category score breakdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryScore {
@@ -281,5 +312,49 @@ mod tests {
         assert!(!Letter::DPlus.is_passing());
         assert!(!Letter::F.is_passing());
         assert!(Letter::APlus.is_passing());
+    }
+
+    #[test]
+    fn letter_roundtrips_display_to_fromstr() {
+        use std::str::FromStr;
+        for l in [
+            Letter::APlus,
+            Letter::A,
+            Letter::AMinus,
+            Letter::BPlus,
+            Letter::B,
+            Letter::BMinus,
+            Letter::CPlus,
+            Letter::C,
+            Letter::CMinus,
+            Letter::DPlus,
+            Letter::D,
+            Letter::DMinus,
+            Letter::F,
+        ] {
+            let s = l.to_string();
+            let parsed =
+                Letter::from_str(&s).unwrap_or_else(|e| panic!("failed to parse {s:?}: {e}"));
+            assert_eq!(parsed, l, "round-trip failed for {l:?} → {s:?}");
+        }
+    }
+
+    #[test]
+    fn letter_fromstr_accepts_ascii_dash_and_lowercase() {
+        use std::str::FromStr;
+        assert_eq!(Letter::from_str("A-").unwrap(), Letter::AMinus);
+        assert_eq!(Letter::from_str("a-").unwrap(), Letter::AMinus);
+        assert_eq!(Letter::from_str(" b+ ").unwrap(), Letter::BPlus);
+        // Unicode minus from Display:
+        assert_eq!(Letter::from_str("A−").unwrap(), Letter::AMinus);
+    }
+
+    #[test]
+    fn letter_fromstr_rejects_garbage() {
+        use std::str::FromStr;
+        let err = Letter::from_str("Z").unwrap_err();
+        assert!(err.contains("unknown grade"));
+        assert!(Letter::from_str("").is_err());
+        assert!(Letter::from_str("E").is_err());
     }
 }

@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 description = "Core types and orchestration for the Holocron Rust auditor"
 repository.workspace = true
+publish = false  # workspace-internal; install via `cargo install --path crates/holocron-cli`
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

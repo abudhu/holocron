@@ -1,0 +1,74 @@
+# cargo-deny configuration for the Holocron project.
+#
+# This file is BOTH:
+#   1. The config used when `cargo deny check` runs against holocron's own tree
+#      (i.e. our dogfood — we hold ourselves to the policy we ship as a default).
+#   2. The template shipped by holocron's `cargo-deny` auditor as a fallback
+#      when the target project doesn't have its own deny.toml.
+#
+# Allowed licenses: the standard permissive set used across the Rust ecosystem.
+# Add or remove entries here as the project's policy evolves.
+
+[graph]
+# Build the dep graph for the host triples Holocron's users care about.
+# (cargo-deny restricts checks to these targets — anything platform-specific
+#  outside this list is invisible.)
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+# We have cargo-audit for CVE coverage, but cargo-deny's advisories check
+# duplicates the work (intentional). yanked = warn so it surfaces but doesn't
+# block, since yanking is sometimes the correct upstream signal even for
+# crates we depend on.
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Permissive open-source licenses that compose cleanly with MIT.
+# Anything outside this list will trip the `cargo deny check licenses` step.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",  # legacy form, still in use by some pinned crates
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",  # file-level copyleft, fine for linking
+    "0BSD",
+]
+# A confidence threshold of 0.93 is the cargo-deny default and works well —
+# license detection below this gets surfaced for human review.
+confidence-threshold = 0.93
+
+[bans]
+# Catch accidental dupes — pulling two versions of the same crate inflates
+# binary size and signals an upgrade is overdue somewhere in the tree.
+multiple-versions = "warn"
+# Wildcards are bad in *published* deps but fine for workspace path deps
+# (which is how `holocron-cli` etc. reference each other via
+# `holocron-core.workspace = true`). The flag below tells cargo-deny to
+# allow that pattern specifically.
+wildcards = "deny"
+allow-wildcard-paths = true
+# Treat dev/build-only crates more leniently — they don't ship in the binary.
+allow = []
+deny = []
+
+[sources]
+# Forbid pulling crates from anywhere other than crates.io + the explicit
+# git allowlist. Belt-and-suspenders against typo-squat attacks and unaudited
+# forks.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
