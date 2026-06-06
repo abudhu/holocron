@@ -23,7 +23,7 @@ This applies to all project spaces:
 ## Enforcement
 
 If you experience or witness behavior that violates this Code of
-Conduct, please report it to **conduct@amitbudhu.com**.
+Conduct, please report it to **me@amitbudhu.com**.
 
 All reports will be:
 

@@ -14,7 +14,7 @@ Holocron is pre-1.0 and ships from `main`. Only the latest commit on
 
 Please report security issues **privately** — do NOT open a public issue.
 
-**Preferred:** email **security@amitbudhu.com** with:
+**Preferred:** email **me@amitbudhu.com** with:
 
 - A description of the vulnerability
 - Steps to reproduce (proof-of-concept code is welcome)
