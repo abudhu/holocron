@@ -59,69 +59,58 @@ impl Auditor for OutdatedAuditor {
 /// Parse cargo-outdated's NDJSON output. Each line is a workspace-member
 /// envelope with the member's name and its outdated dependencies.
 fn parse_outdated_stream(text: &str) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let mut seen_fingerprints: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    text.lines()
+        .filter_map(parse_member_line)
+        .flat_map(|env| env.dependencies.into_iter().map(move |dep| (env.crate_name.clone(), dep)))
+        .filter_map(|(member, dep)| dep_to_finding(&member, &dep, &mut seen))
+        .collect()
+}
 
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || !line.starts_with('{') {
-            continue;
-        }
-        let envelope: WorkspaceMember = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for dep in envelope.dependencies {
-            // Outdated reports many things ("compat == latest == project"
-            // is "fully up to date" — skip).
-            let kind = classify(&dep);
-            let Some(severity) = severity_for(kind) else {
-                continue;
-            };
-            // Dedup: a dep shared across several workspace members will
-            // surface once per member. Collapse by (name, project, latest).
-            let key = format!("{}@{}->{}", dep.name, dep.project, dep.latest);
-            if !seen_fingerprints.insert(key.clone()) {
-                continue;
-            }
-            let message = match kind {
-                UpdateKind::Major => {
-                    format!(
-                        "`{}` major upgrade available: {} → {}",
-                        dep.name, dep.project, dep.latest
-                    )
-                }
-                UpdateKind::Minor => {
-                    format!(
-                        "`{}` minor upgrade available: {} → {}",
-                        dep.name, dep.project, dep.latest
-                    )
-                }
-                UpdateKind::Patch => {
-                    format!(
-                        "`{}` patch upgrade available: {} → {}",
-                        dep.name, dep.project, dep.latest
-                    )
-                }
-                UpdateKind::Current => continue, // unreachable, severity_for filters
-            };
-            let detail = format!(
-                "Workspace member: {}\nKind: {}\nProject: {}\nCompat: {}\nLatest: {}",
-                envelope.crate_name, dep.kind, dep.project, dep.compat, dep.latest,
-            );
-            findings.push(
-                Finding::new("cargo-outdated", Category::Maintenance, severity, message)
-                    .with_code(match kind {
-                        UpdateKind::Major => "outdated-major",
-                        UpdateKind::Minor => "outdated-minor",
-                        UpdateKind::Patch => "outdated-patch",
-                        UpdateKind::Current => "outdated-current",
-                    })
-                    .with_detail(detail),
-            );
-        }
+/// Parse a single NDJSON line into a `WorkspaceMember`. Returns `None`
+/// for blank lines, non-JSON, and malformed envelopes.
+fn parse_member_line(line: &str) -> Option<WorkspaceMember> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
     }
-    findings
+    serde_json::from_str(line).ok()
+}
+
+/// Convert one `Dependency` into a Finding, deduplicating across
+/// workspace members (the same dep shared between members would
+/// otherwise surface twice). Returns `None` when the dep is current
+/// (nothing to flag) or already seen.
+fn dep_to_finding(
+    member: &str,
+    dep: &Dependency,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<Finding> {
+    let kind = classify(dep);
+    let severity = severity_for(kind)?;
+    let key = format!("{}@{}->{}", dep.name, dep.project, dep.latest);
+    if !seen.insert(key) {
+        return None;
+    }
+    let (verb, code) = match kind {
+        UpdateKind::Major => ("major", "outdated-major"),
+        UpdateKind::Minor => ("minor", "outdated-minor"),
+        UpdateKind::Patch => ("patch", "outdated-patch"),
+        // unreachable: severity_for(Current) returns None and we
+        // already short-circuited.
+        UpdateKind::Current => return None,
+    };
+    let message =
+        format!("`{}` {verb} upgrade available: {} → {}", dep.name, dep.project, dep.latest);
+    let detail = format!(
+        "Workspace member: {member}\nKind: {}\nProject: {}\nCompat: {}\nLatest: {}",
+        dep.kind, dep.project, dep.compat, dep.latest,
+    );
+    Some(
+        Finding::new("cargo-outdated", Category::Maintenance, severity, message)
+            .with_code(code)
+            .with_detail(detail),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

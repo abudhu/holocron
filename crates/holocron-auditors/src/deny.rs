@@ -79,58 +79,76 @@ impl Auditor for DenyAuditor {
 /// Parse cargo-deny's `--format=json` NDJSON stream. Each line is one
 /// diagnostic object; we only keep the ones we know how to map.
 fn parse_deny_stream(text: &str) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let mut seen_codes_per_msg: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    text.lines()
+        .filter_map(parse_diag_line)
+        .filter_map(|d| diag_to_finding(&d, &mut seen_keys))
+        .collect()
+}
 
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || !line.starts_with('{') {
-            continue;
-        }
-        let envelope: DiagnosticEnvelope = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if envelope.r#type != "diagnostic" {
-            continue;
-        }
-        let diag = envelope.fields;
-        // cargo-deny re-emits the same license-rejected diagnostic for
-        // every crate touched by it. The crate name is on the graph
-        // root; we use it for dedup.
-        let crate_name = diag.first_crate_name().unwrap_or_default();
-        let dedup_key = format!("{}|{}|{crate_name}", diag.code, diag.message);
-        if !seen_codes_per_msg.insert(dedup_key) {
-            continue;
-        }
-
-        let severity = map_severity(&diag.severity, &diag.code);
-        let message = if crate_name.is_empty() {
-            diag.message.clone()
-        } else {
-            format!("[{crate_name}] {}", diag.message)
-        };
-
-        let mut detail_lines: Vec<String> = vec![];
-        if let Some(label) = diag.first_label_message() {
-            if !label.is_empty() {
-                detail_lines.push(label);
-            }
-        }
-        for note in diag.notes.iter().take(4) {
-            detail_lines.push(note.clone());
-        }
-        let detail = if detail_lines.is_empty() { None } else { Some(detail_lines.join("\n")) };
-
-        let mut f = Finding::new("cargo-deny", Category::Maintenance, severity, message)
-            .with_code(diag.code.clone());
-        if let Some(d) = detail {
-            f = f.with_detail(d);
-        }
-        findings.push(f);
+/// Parse a single NDJSON line into a `Diagnostic`. Returns `None` for
+/// blanks, non-JSON lines, non-diagnostic envelopes, and malformed JSON
+/// — all of which cargo-deny mixes into its stream alongside the real
+/// diagnostics.
+fn parse_diag_line(line: &str) -> Option<Diagnostic> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
     }
-    findings
+    let env: DiagnosticEnvelope = serde_json::from_str(line).ok()?;
+    if env.r#type != "diagnostic" {
+        return None;
+    }
+    Some(env.fields)
+}
+
+/// Convert one parsed diagnostic into a Finding, deduplicating against
+/// the running set. Returns `None` when the diagnostic is a repeat
+/// (cargo-deny re-emits the same license-rejected diagnostic for every
+/// crate touched by it).
+fn diag_to_finding(
+    diag: &Diagnostic,
+    seen_keys: &mut std::collections::HashSet<String>,
+) -> Option<Finding> {
+    let crate_name = diag.first_crate_name().unwrap_or_default();
+    let dedup_key = format!("{}|{}|{crate_name}", diag.code, diag.message);
+    if !seen_keys.insert(dedup_key) {
+        return None;
+    }
+    let severity = map_severity(&diag.severity, &diag.code);
+    let message = if crate_name.is_empty() {
+        diag.message.clone()
+    } else {
+        format!("[{crate_name}] {}", diag.message)
+    };
+    let detail = collect_detail(diag);
+
+    let mut f = Finding::new("cargo-deny", Category::Maintenance, severity, message)
+        .with_code(diag.code.clone());
+    if let Some(d) = detail {
+        f = f.with_detail(d);
+    }
+    Some(f)
+}
+
+/// Build the `detail` string from a diagnostic's first label + first
+/// 4 notes. Returns `None` when there's nothing to include — the
+/// Finding then omits the detail field entirely.
+fn collect_detail(diag: &Diagnostic) -> Option<String> {
+    let mut lines: Vec<String> = vec![];
+    if let Some(label) = diag.first_label_message() {
+        if !label.is_empty() {
+            lines.push(label);
+        }
+    }
+    for note in diag.notes.iter().take(4) {
+        lines.push(note.clone());
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 fn map_severity(level: &str, code: &str) -> Severity {
