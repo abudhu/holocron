@@ -113,6 +113,15 @@ jobs:
   # inside the gate step) means transient network blips fail this step
   # cleanly and the rerun has a clear, scoped retry target. Cached into
   # .cargo-home/bin so steady-state runs skip all of this.
+  #
+  # COLD-CACHE OPTIMIZATION (#33): use cargo-binstall to fetch precompiled
+  # binaries instead of compiling from source. Each `cargo install` of a
+  # mid-size auditor like cargo-deny or cargo-geiger takes 60-120s; binstall
+  # downloads the GitHub release artefact in 5-15s. Total install step:
+  # ~5min cold -> ~1min cold, while warm-cache behaviour is unchanged
+  # (the `command -v $name` check short-circuits before any install).
+  # rust-code-analysis-cli has no GitHub binary releases, so it falls
+  # back to the from-source path.
   - type: CommandStep
     name: install auditor binaries
     runInContainer: true
@@ -127,8 +136,17 @@ jobs:
         export PATH="$CARGO_HOME/bin:$PATH"
         mkdir -p "$CARGO_HOME/bin"
 
-        # Resilient cargo-install: retry on the transient "http2: client
-        # connection lost" error we see when crates.io has a network blip.
+        # Bootstrap cargo-binstall once. It ships a one-line installer that
+        # downloads its own precompiled binary so we don't pay a from-source
+        # compile for the tool that exists to skip from-source compiles.
+        if ! command -v cargo-binstall >/dev/null 2>&1; then
+          echo "=== bootstrapping cargo-binstall ==="
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+        fi
+
+        # Resilient install: try binstall first (precompiled GitHub release),
+        # fall back to cargo install --locked on failure. Both modes are
+        # network-bound and benefit from the 3-attempt retry.
         #
         # NOTE: install_one takes a single string of args (instead of using
         # bash positional forwarding) because OneDev's buildspec parser
@@ -139,12 +157,18 @@ jobs:
         install_one() {
           local name="$1"
           local args="$2"
+          local prefer_binstall="${3:-true}"
           if command -v "$name" >/dev/null 2>&1; then
             echo "=== $name already installed: $(command -v "$name") ==="
             return 0
           fi
           for attempt in 1 2 3; do
             echo "=== installing $name (attempt $attempt) ==="
+            if [ "$prefer_binstall" = "true" ]; then
+              # binstall: precompiled binary from GitHub releases
+              if cargo binstall --no-confirm $args; then return 0; fi
+              echo "=== binstall failed, falling back to from-source ==="
+            fi
             # Intentionally unquoted to allow word-splitting of $args.
             if cargo install $args --locked; then
               return 0
@@ -161,7 +185,9 @@ jobs:
         install_one cargo-deny "cargo-deny"
         install_one cargo-outdated "cargo-outdated"
         install_one cargo-geiger "cargo-geiger"
-        install_one rust-code-analysis-cli "--git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli"
+        # rust-code-analysis-cli has no GitHub binary releases — skip
+        # binstall and go straight to from-source.
+        install_one rust-code-analysis-cli "--git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli" false
 
         echo "=== installed binaries ==="
         ls -la "$CARGO_HOME/bin"
