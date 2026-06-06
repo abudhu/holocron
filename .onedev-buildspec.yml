@@ -230,6 +230,17 @@ jobs:
         cargo --version
         rustup component add clippy 2>/dev/null || true
 
+        # Pre-fetch all registry sources. Without this step, a cold-cache
+        # restore can leave the registry INDEX populated but specific
+        # crate src/ trees not yet extracted from tarballs, and the first
+        # holocron-driven cargo invocation (clippy, cargo-audit, etc)
+        # fails with `error: Io(NotFound) ".cargo-home/registry/src/.../<crate>/src/lib.rs"`.
+        # Build #25 hit this on the v1->v2 cache transition. cargo fetch
+        # is the canonical fix — resolves the lockfile and extracts every
+        # source tree before any parallel auditor touches the cache.
+        echo "=== pre-fetch registry sources ==="
+        cargo fetch --locked
+
         echo "=== holocron audits holocron ==="
         ./target/release/holocron audit . --progress log --fail-below A-
     useTTY: false
