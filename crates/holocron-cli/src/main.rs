@@ -30,6 +30,25 @@ enum Command {
     /// runs fine with no config file — this is purely for projects that
     /// want to commit their tuning into the repo.
     Init(InitArgs),
+    /// Look up a finding by fingerprint and emit an LLM-friendly
+    /// explanation block ready to paste into a coding agent.
+    ///
+    /// The output is a Markdown block containing the finding's full
+    /// context (auditor, severity, location, rendered diagnostic) plus
+    /// a pre-formatted "ask the LLM to fix this" prompt template.
+    Explain(ExplainArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ExplainArgs {
+    /// The finding fingerprint (16-char hex string). Look this up in
+    /// the JSON sidecar's `findings[*].fingerprint` field.
+    fingerprint: String,
+
+    /// JSON sidecar from a prior `holocron audit` run. Defaults to the
+    /// most recent `/tmp/holocron-*-*.json` (lexicographic).
+    #[arg(long)]
+    from: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -107,6 +126,13 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Command::Explain(args) => match explain(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(2)
+            }
+        },
     }
 }
 
@@ -137,6 +163,158 @@ fn init(args: &InitArgs) -> Result<()> {
     println!("it yet. The schema is committed so you can pre-stage your tuning");
     println!("now and it'll take effect when later issues land.");
     Ok(())
+}
+
+fn explain(args: &ExplainArgs) -> Result<()> {
+    let path = match &args.from {
+        Some(p) => p.clone(),
+        None => latest_audit_json()?,
+    };
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading sidecar {}", path.display()))?;
+    let sidecar: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
+
+    let findings = sidecar["findings"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("sidecar has no `findings` array: {}", path.display()))?;
+
+    let needle = args.fingerprint.trim();
+    let matched = findings.iter().find(|f| f["fingerprint"].as_str() == Some(needle));
+    let Some(finding) = matched else {
+        eprintln!(
+            "fingerprint {needle} not found in {}\n\
+             (search the sidecar's findings[*].fingerprint field; first 8 chars also accepted)",
+            path.display()
+        );
+        // Try a prefix match for ergonomics
+        let prefix_hit = findings
+            .iter()
+            .find(|f| f["fingerprint"].as_str().is_some_and(|s| s.starts_with(needle)));
+        if let Some(p) = prefix_hit {
+            eprintln!(
+                "\nDid you mean fingerprint {} ({})?",
+                p["fingerprint"].as_str().unwrap_or(""),
+                p["message"].as_str().unwrap_or("")
+            );
+        }
+        anyhow::bail!("no finding matched {needle}");
+    };
+
+    print_explanation_markdown(finding, &path);
+    Ok(())
+}
+
+/// Find the most recent `/tmp/holocron-*.json` by filename
+/// (lexicographic — the timestamps in the filename sort naturally).
+fn latest_audit_json() -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir("/tmp")
+        .context("reading /tmp")?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
+            name.starts_with("holocron-")
+                && std::path::Path::new(name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
+        .collect();
+    candidates.sort();
+    candidates.pop().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no /tmp/holocron-*.json sidecar found — run `holocron audit <path>` first, \
+             or pass --from <path>"
+        )
+    })
+}
+
+/// Render an LLM-friendly explanation of a single finding to stdout.
+///
+/// The output is a Markdown block sized for direct paste into a coding
+/// agent (Cortana, Codex, Claude Code). It has three sections:
+///   1. The finding itself — auditor, severity, message, location.
+///   2. The renderer's detail string if present (full diagnostic).
+///   3. A prompt template the user can hand to an LLM.
+fn print_explanation_markdown(finding: &serde_json::Value, sidecar_path: &Path) {
+    let auditor = finding["auditor"].as_str().unwrap_or("?");
+    let severity = finding["severity"].as_str().unwrap_or("?");
+    let category = finding["category"].as_str().unwrap_or("?");
+    let code = finding["code"].as_str().unwrap_or("(no code)");
+    let message = finding["message"].as_str().unwrap_or("(no message)");
+    let fingerprint = finding["fingerprint"].as_str().unwrap_or("?");
+    let location_str = render_location(&finding["location"]);
+    let detail = finding["detail"].as_str().unwrap_or("").trim();
+
+    println!("# Holocron finding {fingerprint}");
+    println!();
+    println!("**Auditor:** `{auditor}` • **Category:** {category} • **Severity:** {severity}");
+    println!("**Code:** `{code}`");
+    println!("**Location:** {location_str}");
+    println!("**Source sidecar:** `{}`", sidecar_path.display());
+    println!();
+    println!("## What it says");
+    println!();
+    println!("{message}");
+    if !detail.is_empty() {
+        println!();
+        println!("## Full diagnostic");
+        println!();
+        println!("```");
+        for line in detail.lines() {
+            println!("{line}");
+        }
+        println!("```");
+    }
+    println!();
+    println!("## Ask an LLM to fix it");
+    println!();
+    println!("Paste this into Cortana, Codex, Claude Code, etc:");
+    println!();
+    println!("---");
+    println!();
+    println!(
+        "I have a Rust code-quality finding from `holocron audit` (auditor: \
+              `{auditor}`, severity {severity}) that I want to address:"
+    );
+    println!();
+    println!("- **Location:** {location_str}");
+    println!("- **Code:** `{code}`");
+    println!("- **Message:** {message}");
+    if !detail.is_empty() {
+        println!("- **Detail:**");
+        println!();
+        println!("  ```");
+        for line in detail.lines().take(20) {
+            println!("  {line}");
+        }
+        println!("  ```");
+    }
+    println!();
+    println!("Please:");
+    println!("1. Read the file at the location above and the surrounding context (~20 lines either side).");
+    println!("2. Explain what this finding means in one short paragraph.");
+    println!("3. Propose the minimal fix that satisfies the lint without changing behavior.");
+    println!("4. Show me the unified diff.");
+    println!("5. Call out any trade-offs (e.g. a clippy lint that's wrong for this codebase).");
+    println!();
+    println!("Do NOT make the change yet — just show me the diff and your reasoning.");
+}
+
+fn render_location(loc: &serde_json::Value) -> String {
+    if loc.is_null() {
+        return "(no location)".to_string();
+    }
+    let file = loc["file"].as_str().unwrap_or("?");
+    let line = loc["line"].as_u64();
+    let col = loc["column"].as_u64();
+    match (line, col) {
+        (Some(l), Some(c)) => format!("`{file}:{l}:{c}`"),
+        (Some(l), None) => format!("`{file}:{l}`"),
+        _ => format!("`{file}`"),
+    }
 }
 
 async fn audit(args: AuditArgs) -> Result<ExitCode> {
@@ -511,5 +689,86 @@ mod tests {
         // doesn't parse, every `holocron init` produces a broken file.
         let _: toml::Value =
             toml::from_str(DEFAULT_HOLOCRONRC).expect("DEFAULT_HOLOCRONRC must be valid TOML");
+    }
+
+    // --- holocron explain (#16) ---
+
+    fn sample_sidecar() -> String {
+        // Mirror the real shape produced by holocron-report::render_json
+        r#"{
+          "schema_version": 2,
+          "findings": [
+            {
+              "fingerprint": "a1b2c3d4e5f60718",
+              "auditor": "clippy",
+              "category": "Lints",
+              "severity": "Medium",
+              "code": "clippy::manual_let_else",
+              "message": "this could be rewritten as `let...else`",
+              "location": {"file": "src/foo.rs", "line": 42, "column": 5},
+              "detail": "warning: this could be rewritten...\n  --> src/foo.rs:42:5"
+            },
+            {
+              "fingerprint": "ffffeeeebbbb0000",
+              "auditor": "cargo-audit",
+              "category": "Security",
+              "severity": "Critical",
+              "code": "RUSTSEC-2024-0001",
+              "message": "RUSTSEC-2024-0001: bad thing happens",
+              "location": null,
+              "detail": ""
+            }
+          ]
+        }"#
+        .to_string()
+    }
+
+    fn write_sidecar(d: &TempDir) -> PathBuf {
+        let path = d.path().join("holocron-test.json");
+        std::fs::write(&path, sample_sidecar()).unwrap();
+        path
+    }
+
+    #[test]
+    fn explain_resolves_fingerprint_via_explicit_from() {
+        let d = TempDir::new().unwrap();
+        let path = write_sidecar(&d);
+        let args = ExplainArgs { fingerprint: "a1b2c3d4e5f60718".to_string(), from: Some(path) };
+        // Should not error.
+        explain(&args).unwrap();
+    }
+
+    #[test]
+    fn explain_errors_on_unknown_fingerprint() {
+        let d = TempDir::new().unwrap();
+        let path = write_sidecar(&d);
+        let args = ExplainArgs { fingerprint: "0000000000000000".to_string(), from: Some(path) };
+        let err = explain(&args).unwrap_err();
+        assert!(err.to_string().contains("no finding matched"), "got: {err}");
+    }
+
+    #[test]
+    fn explain_errors_on_missing_sidecar() {
+        let args = ExplainArgs {
+            fingerprint: "deadbeef".to_string(),
+            from: Some(PathBuf::from("/tmp/this-sidecar-does-not-exist-12345.json")),
+        };
+        let err = explain(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("reading sidecar") || err.to_string().contains("No such"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn render_location_handles_null_partial_and_full() {
+        let null = render_location(&serde_json::Value::Null);
+        assert!(null.contains("no location"));
+        let line_only =
+            render_location(&serde_json::json!({"file": "src/a.rs", "line": 7, "column": null}));
+        assert_eq!(line_only, "`src/a.rs:7`");
+        let full =
+            render_location(&serde_json::json!({"file": "src/a.rs", "line": 7, "column": 12}));
+        assert_eq!(full, "`src/a.rs:7:12`");
     }
 }

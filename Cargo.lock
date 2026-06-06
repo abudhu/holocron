@@ -364,6 +364,7 @@ dependencies = [
  "holocron-auditors",
  "holocron-core",
  "holocron-report",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
