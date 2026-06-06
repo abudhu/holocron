@@ -21,15 +21,26 @@ pub use rustsec::RustSecAuditor;
 
 use std::sync::Arc;
 
-/// The default v0.2 auditor set. Returned as `Arc<dyn Auditor>` so the
-/// runner can hold them without further plumbing.
+/// The default v0.2 auditor set with no config-driven overrides.
+/// Equivalent to [`default_set_with_thresholds`] called with
+/// [`ComplexityThresholds::default()`].
 #[must_use]
 pub fn default_set() -> Vec<Arc<dyn holocron_core::Auditor>> {
+    default_set_with_thresholds(ComplexityThresholds::default())
+}
+
+/// The default v0.2 auditor set with caller-provided complexity
+/// thresholds. The CLI layer derives `thresholds` from
+/// `.holocronrc.toml`'s `[complexity]` section (`#31`).
+#[must_use]
+pub fn default_set_with_thresholds(
+    thresholds: ComplexityThresholds,
+) -> Vec<Arc<dyn holocron_core::Auditor>> {
     vec![
         Arc::new(ClippyAuditor { extra_warn_flags: vec![] }),
         Arc::new(RustSecAuditor),
         Arc::new(MacheteAuditor),
-        Arc::new(ComplexityAuditor { thresholds: ComplexityThresholds::default() }),
+        Arc::new(ComplexityAuditor { thresholds }),
         Arc::new(DenyAuditor),
         Arc::new(OutdatedAuditor),
         Arc::new(GeigerAuditor),

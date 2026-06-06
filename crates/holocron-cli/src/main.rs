@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use holocron_auditors::default_set;
+use holocron_auditors::{default_set_with_thresholds, ComplexityThresholds};
 use holocron_core::{CategoryScore, Grade, GradeReport, Letter, Runner};
 use holocron_report::{render_json, render_markdown, render_sarif, Report};
 use std::path::{Path, PathBuf};
@@ -330,7 +330,29 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     info!(target = %target.display(), "starting audit");
     println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
 
-    let outcome = build_runner(&target, &args).run().await.context("running auditors")?;
+    // Load .holocronrc.toml if present (walks up from target). Errors
+    // are fast-fail (exit 2 via the error path) so users see broken
+    // config before audit spends 30s warming up.
+    let (rc, rc_path) =
+        holocron_core::HolocronConfig::load_from(&target).context("loading .holocronrc.toml")?;
+    if let Some(p) = &rc_path {
+        println!("Config: {}", p.display());
+    }
+
+    // Merge: explicit --fail-below wins. Otherwise fall back to rc.
+    // (The rc loader has already parsed + validated the letter; this
+    // call is infallible because of that.)
+    let effective_fail_below = match args.fail_below {
+        Some(letter) => Some(letter),
+        None => rc.gate.fail_below_letter().ok().flatten(),
+    };
+
+    // Derive ComplexityThresholds from rc. Missing keys keep the
+    // built-in defaults; #31 acceptance.
+    let thresholds = merge_complexity_thresholds(&rc.complexity);
+
+    let outcome =
+        build_runner(&target, &args, thresholds).run().await.context("running auditors")?;
     let grade = Grade::new(&outcome.auditor_results).compute();
     let report = Report::new(&outcome, &grade);
 
@@ -345,7 +367,7 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     //   0 = clean / gate passed
     // Gate failure wins over outage so a regression isn't masked when
     // BOTH happened.
-    let exit_kind = decide_exit(&grade, args.fail_below);
+    let exit_kind = decide_exit(&grade, effective_fail_below);
     match exit_kind {
         ExitKind::GateFailed(threshold) => eprintln!(
             "\nGATE FAILED: grade {} is below threshold {}",
@@ -370,7 +392,7 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
             );
         }
         ExitKind::Clean => {
-            if let Some(threshold) = args.fail_below {
+            if let Some(threshold) = effective_fail_below {
                 println!("Gate passed: {} ≥ {}", grade.overall_letter, threshold);
             }
         }
@@ -414,14 +436,32 @@ fn decide_exit(grade: &GradeReport, threshold: Option<Letter>) -> ExitKind {
 }
 
 /// Construct the [`Runner`] with the default auditor set and CLI flags applied.
-fn build_runner(target: &Path, args: &AuditArgs) -> Runner {
+fn build_runner(target: &Path, args: &AuditArgs, thresholds: ComplexityThresholds) -> Runner {
     let mut runner = Runner::new(target)
         .with_timeout(Duration::from_secs(args.timeout))
         .with_install_missing(args.install_missing);
-    for a in default_set() {
+    for a in default_set_with_thresholds(thresholds) {
         runner = runner.with_auditor(a);
     }
     runner
+}
+
+/// Merge rc-provided complexity thresholds onto the built-in defaults.
+/// Missing rc keys keep the defaults; present rc keys override.
+fn merge_complexity_thresholds(rc: &holocron_core::ComplexityConfig) -> ComplexityThresholds {
+    let mut t = ComplexityThresholds::default();
+    if let Some(v) = rc.cyclomatic_medium {
+        t.cyclomatic_warn = v;
+    }
+    if let Some(v) = rc.cyclomatic_high {
+        t.cyclomatic_high = v;
+    }
+    if let Some(v) = rc.cognitive_medium {
+        t.cognitive_warn = v;
+    }
+    // cognitive_high is reserved for a follow-up (see ComplexityConfig
+    // doc) — ignored here even when set in rc, by design.
+    t
 }
 
 /// Render the Markdown report (always), JSON sidecar (unless `--no-json`),
@@ -794,5 +834,54 @@ mod tests {
         let full =
             render_location(&serde_json::json!({"file": "src/a.rs", "line": 7, "column": 12}));
         assert_eq!(full, "`src/a.rs:7:12`");
+    }
+
+    // --- rc merge: #31 ---
+
+    #[test]
+    fn merge_thresholds_keeps_defaults_when_rc_empty() {
+        let rc = holocron_core::ComplexityConfig::default();
+        let merged = merge_complexity_thresholds(&rc);
+        let defaults = ComplexityThresholds::default();
+        assert_eq!(merged.cyclomatic_warn, defaults.cyclomatic_warn);
+        assert_eq!(merged.cyclomatic_high, defaults.cyclomatic_high);
+        assert_eq!(merged.cognitive_warn, defaults.cognitive_warn);
+    }
+
+    #[test]
+    fn merge_thresholds_overrides_only_set_keys() {
+        let rc = holocron_core::ComplexityConfig {
+            cyclomatic_medium: Some(10),
+            cyclomatic_high: None,
+            cognitive_medium: Some(12),
+            cognitive_high: None,
+        };
+        let merged = merge_complexity_thresholds(&rc);
+        let defaults = ComplexityThresholds::default();
+        assert_eq!(merged.cyclomatic_warn, 10, "cyclomatic_warn overridden");
+        assert_eq!(
+            merged.cyclomatic_high, defaults.cyclomatic_high,
+            "cyclomatic_high kept default"
+        );
+        assert_eq!(merged.cognitive_warn, 12, "cognitive_warn overridden");
+    }
+
+    #[test]
+    fn merge_thresholds_ignores_cognitive_high_today() {
+        // cognitive_high is reserved for a follow-up. Setting it in rc
+        // must NOT change the merged thresholds.
+        let rc = holocron_core::ComplexityConfig {
+            cyclomatic_medium: None,
+            cyclomatic_high: None,
+            cognitive_medium: None,
+            cognitive_high: Some(99),
+        };
+        let merged = merge_complexity_thresholds(&rc);
+        let defaults = ComplexityThresholds::default();
+        // No new field for cognitive_high yet — assert the existing 3
+        // are unchanged.
+        assert_eq!(merged.cyclomatic_warn, defaults.cyclomatic_warn);
+        assert_eq!(merged.cyclomatic_high, defaults.cyclomatic_high);
+        assert_eq!(merged.cognitive_warn, defaults.cognitive_warn);
     }
 }
