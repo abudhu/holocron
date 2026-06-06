@@ -236,9 +236,9 @@ fn init(args: &InitArgs) -> Result<()> {
         .with_context(|| format!("writing {}", dest.display()))?;
     println!("Wrote {}", dest.display());
     println!();
-    println!("This file is currently advisory — Holocron's runtime doesn't read");
-    println!("it yet. The schema is committed so you can pre-stage your tuning");
-    println!("now and it'll take effect when later issues land.");
+    println!("Every section in this file is wired and active. Uncomment the keys");
+    println!("you want to override and re-run `holocron audit`. Unknown keys are");
+    println!("rejected at load with a line-numbered error.");
     Ok(())
 }
 
