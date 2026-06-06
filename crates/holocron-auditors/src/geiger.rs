@@ -58,12 +58,11 @@ impl Auditor for GeigerAuditor {
         // workspace members and their manifest paths, then run geiger
         // once per member from that member's directory.
         let members = workspace_members(target).await?;
-        if members.is_empty() {
-            anyhow::bail!(
-                "no runnable packages found in {} — cargo-geiger needs at least one bin or lib",
-                target.display()
-            );
-        }
+        anyhow::ensure!(
+            !members.is_empty(),
+            "no runnable packages found in {} — cargo-geiger needs at least one bin or lib",
+            target.display()
+        );
 
         // Local crate names — for severity classification (workspace
         // members get High severity for unsafe in their own code).
@@ -72,63 +71,141 @@ impl Auditor for GeigerAuditor {
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut all_findings = Vec::new();
+        // #38: track success/failure so we can distinguish "geiger ran
+        // clean on everything" from "geiger silently failed on every
+        // member" — the latter must surface as Failed, not Ok(empty).
+        let mut members_succeeded: usize = 0;
+        let mut first_member_failure: Option<(String, String)> = None;
 
         for member in &members {
-            // Member's directory is the parent of its manifest.
-            let Some(member_dir) = member.manifest_path.parent() else {
-                eprintln!(
-                    "[holocron geiger] skipping member {} with no parent dir: {}",
-                    member.name,
-                    member.manifest_path.display()
-                );
-                continue;
-            };
-
-            let output = Command::new("cargo")
-                .current_dir(member_dir)
-                .args(["geiger", "--output-format", "Json", "--all-features"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .await?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "[holocron geiger] no JSON for {} (exit {}); stderr: {stderr}",
-                    member.name, output.status
-                );
-                continue;
-            }
-
-            let report: SafetyReport = serde_json::from_str(&stdout).map_err(|e| {
-                anyhow::anyhow!("failed to parse cargo-geiger JSON for {}: {e}", member.name)
-            })?;
-
-            // Build direct-dep set FOR THIS MEMBER: any package that
-            // appears as a dependency of a local crate is "direct".
-            let mut direct_ids: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            for entry in &report.packages {
-                if local_ids.contains(&entry.package.id.name) {
-                    for dep in &entry.package.dependencies {
-                        direct_ids.insert(dep.name.clone());
+            match run_geiger_for_member(member, &local_ids).await? {
+                MemberOutcome::Ok(findings) => {
+                    for finding in findings {
+                        let key = format!(
+                            "{}|{}",
+                            finding.code.as_deref().unwrap_or(""),
+                            finding.message
+                        );
+                        if seen.insert(key) {
+                            all_findings.push(finding);
+                        }
                     }
+                    members_succeeded += 1;
                 }
-            }
-
-            for finding in report_to_findings(&report, &local_ids, &direct_ids) {
-                let key = format!("{}|{}", finding.code.as_deref().unwrap_or(""), finding.message);
-                if seen.insert(key) {
-                    all_findings.push(finding);
+                MemberOutcome::Failed(stderr) => {
+                    if first_member_failure.is_none() {
+                        first_member_failure = Some((member.name.clone(), stderr));
+                    }
                 }
             }
         }
 
+        // #38: if cargo-geiger failed on EVERY workspace member, the
+        // category was not measured at all. Don't return Ok(empty) —
+        // that would inflate the grade. Propagate as Err so the runner
+        // marks the auditor Failed and the grader marks Security as
+        // Skipped (advisory grade, exit code 3).
+        check_geiger_completeness(members.len(), members_succeeded, first_member_failure.as_ref())?;
+
         Ok(all_findings)
     }
+}
+
+/// What happened when we ran geiger against a single workspace member.
+enum MemberOutcome {
+    /// Geiger produced parseable JSON. The (already-classified) Findings
+    /// are ready to splice into the audit's accumulator after dedup.
+    Ok(Vec<Finding>),
+    /// Geiger produced no usable JSON for this member (empty stdout,
+    /// non-zero exit, or unparseable output). Carries the stderr blob
+    /// for the caller's diagnostic. NOT an error itself — only an error
+    /// when EVERY member ends in this state (handled by
+    /// `check_geiger_completeness`).
+    Failed(String),
+}
+
+/// Invoke `cargo geiger` for one workspace member and either return
+/// classified Findings (success) or the stderr blob (failure). Pulled
+/// out of `GeigerAuditor::run` so its cyclomatic stays under threshold
+/// (#38: the new completeness check + this dispatch loop together
+/// pushed `run()` to cyc=16; extracting this drops it back below).
+async fn run_geiger_for_member(
+    member: &WorkspaceMember,
+    local_ids: &std::collections::HashSet<String>,
+) -> anyhow::Result<MemberOutcome> {
+    let Some(member_dir) = member.manifest_path.parent() else {
+        eprintln!(
+            "[holocron geiger] skipping member {} with no parent dir: {}",
+            member.name,
+            member.manifest_path.display()
+        );
+        return Ok(MemberOutcome::Failed("(no parent dir)".to_string()));
+    };
+
+    let output = Command::new("cargo")
+        .current_dir(member_dir)
+        .args(["geiger", "--output-format", "Json", "--all-features"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "[holocron geiger] no JSON for {} (exit {}); stderr: {stderr}",
+            member.name, output.status
+        );
+        return Ok(MemberOutcome::Failed(stderr.trim().to_string()));
+    }
+
+    let report: SafetyReport = serde_json::from_str(&stdout).map_err(|e| {
+        anyhow::anyhow!("failed to parse cargo-geiger JSON for {}: {e}", member.name)
+    })?;
+
+    // Build direct-dep set FOR THIS MEMBER: any package that
+    // appears as a dependency of a local crate is "direct".
+    let mut direct_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &report.packages {
+        if local_ids.contains(&entry.package.id.name) {
+            for dep in &entry.package.dependencies {
+                direct_ids.insert(dep.name.clone());
+            }
+        }
+    }
+
+    Ok(MemberOutcome::Ok(report_to_findings(&report, local_ids, &direct_ids)))
+}
+
+/// Decide whether a cargo-geiger run that produced `members_succeeded`
+/// of `members_attempted` is acceptable. Returns `Err` if NO members
+/// succeeded (silent failure mode — would otherwise inflate the grade),
+/// logs a warning to stderr if SOME but not all succeeded (partial
+/// measurement). Pulled out of `run()` so it's testable without
+/// shelling out to cargo-geiger (#38).
+fn check_geiger_completeness(
+    members_attempted: usize,
+    members_succeeded: usize,
+    first_failure: Option<&(String, String)>,
+) -> anyhow::Result<()> {
+    if members_succeeded == 0 && members_attempted > 0 {
+        let (member, stderr) = first_failure
+            .cloned()
+            .unwrap_or_else(|| ("(unknown)".to_string(), "(no stderr captured)".to_string()));
+        anyhow::bail!(
+            "cargo-geiger failed on every workspace member ({members_attempted} attempted, \
+             0 succeeded). First failure was on `{member}`: {stderr}"
+        );
+    }
+    if members_succeeded < members_attempted {
+        eprintln!(
+            "[holocron geiger] WARNING: only {members_succeeded}/{members_attempted} workspace \
+             members measured cleanly; unsafe-surface findings may be incomplete."
+        );
+    }
+    Ok(())
 }
 
 /// Discover workspace members + their manifest paths via `cargo metadata`.
@@ -460,5 +537,60 @@ mod tests {
         let report: SafetyReport = serde_json::from_str(json).unwrap();
         let findings = report_to_findings(&report, &local(), &direct());
         assert!(findings.is_empty(), "unsafe in unused code shouldn't tank the grade");
+    }
+
+    // ── #38 silent-failure prevention tests ─────────────────────────────
+
+    #[test]
+    fn all_members_fail_returns_err() {
+        // 3 members attempted, 0 succeeded → must Err so the runner
+        // marks the auditor Failed and the grader marks Security Skipped.
+        let first_failure =
+            Some(("holocron-core".to_string(), "valuable@0.1.1 not found".to_string()));
+        let result = check_geiger_completeness(3, 0, first_failure.as_ref());
+        assert!(result.is_err(), "all members failing must propagate as Err");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("0 succeeded"), "error must explain count: {err}");
+        assert!(err.contains("holocron-core"), "error must name first failing member: {err}");
+        assert!(
+            err.contains("valuable@0.1.1"),
+            "error must include the upstream stderr blob: {err}"
+        );
+    }
+
+    #[test]
+    fn all_members_fail_without_captured_stderr_still_errs() {
+        // Edge case: first_failure is None (theoretically possible if
+        // all members fell through some other guard). Must still Err.
+        let result = check_geiger_completeness(2, 0, None);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("(unknown)"), "fallback member name: {err}");
+        assert!(err.contains("(no stderr captured)"), "fallback stderr: {err}");
+    }
+
+    #[test]
+    fn partial_member_failure_returns_ok() {
+        // 4 attempted, 2 succeeded → Ok (partial measurement). Stderr
+        // warning is best-effort; we only assert the return type here.
+        let first_failure = Some(("holocron-cli".to_string(), "some error".to_string()));
+        let result = check_geiger_completeness(4, 2, first_failure.as_ref());
+        assert!(result.is_ok(), "partial success must NOT err (the findings we got are real)");
+    }
+
+    #[test]
+    fn all_members_succeed_returns_ok_quietly() {
+        // 3 attempted, 3 succeeded → Ok, no warning expected.
+        let result = check_geiger_completeness(3, 3, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn zero_members_attempted_returns_ok() {
+        // Defensive: empty workspace would have bailed earlier in run(),
+        // but check_geiger_completeness called with (0, 0, None) should
+        // not Err (no measurement was even attempted).
+        let result = check_geiger_completeness(0, 0, None);
+        assert!(result.is_ok(), "empty attempt count must not be conflated with silent failure");
     }
 }
