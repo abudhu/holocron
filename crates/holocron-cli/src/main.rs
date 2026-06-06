@@ -68,6 +68,10 @@ struct InitArgs {
 }
 
 #[derive(clap::Args, Debug)]
+// Each bool here is an independent CLI flag; converting to a state
+// machine or enums would worsen the UX. Accept the lint as documented
+// intent.
+#[allow(clippy::struct_excessive_bools)]
 struct AuditArgs {
     /// Path to a Rust project (must contain Cargo.toml at the root or
     /// any parent directory).
@@ -102,6 +106,16 @@ struct AuditArgs {
     ///   off: no progress output.
     #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
     progress: ProgressMode,
+
+    /// Opt in to mutation testing via cargo-mutants (#32). Off by
+    /// default because cargo-mutants takes 30min-many-hours on real
+    /// workspaces. When enabled, each "missed" mutant becomes a
+    /// Medium finding under the Complexity category (test coverage
+    /// gap). Respects `[auditors].cargo-mutants = false` in rc as a
+    /// kill switch — if the rc explicitly disables it, the flag is
+    /// ignored and it won't run.
+    #[arg(long)]
+    with_mutants: bool,
 
     /// Per-auditor timeout, in seconds. Default 600 (10 minutes).
     /// Complexity scans on large projects can take several minutes.
@@ -373,8 +387,10 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     // auditors produce synthetic Skipped results that we splice into
     // the outcome after the runner finishes — the grader treats those
     // categories as Skipped, distinct from missing-binary or runtime
-    // failures (#28).
-    let (enabled, disabled_results) = default_set_partitioned(thresholds, &rc.auditors);
+    // failures (#28). cargo-mutants (#32) is added to the candidate
+    // set only when --with-mutants is passed.
+    let (enabled, disabled_results) =
+        default_set_partitioned(thresholds, &rc.auditors, args.with_mutants);
 
     // Set up the progress display (#36). For Off mode we skip the sink
     // entirely so we don't pay for an unused channel/task. Both branches

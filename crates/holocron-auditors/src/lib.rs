@@ -7,6 +7,7 @@ pub mod clippy;
 pub mod deny;
 pub mod geiger;
 pub mod machete;
+pub mod mutants;
 pub mod outdated;
 pub mod rust_code_analysis;
 pub mod rustsec;
@@ -15,6 +16,7 @@ pub use clippy::ClippyAuditor;
 pub use deny::DenyAuditor;
 pub use geiger::GeigerAuditor;
 pub use machete::MacheteAuditor;
+pub use mutants::MutantsAuditor;
 pub use outdated::OutdatedAuditor;
 pub use rust_code_analysis::{ComplexityAuditor, ComplexityThresholds};
 pub use rustsec::RustSecAuditor;
@@ -34,6 +36,11 @@ pub fn default_set() -> Vec<Arc<dyn holocron_core::Auditor>> {
 /// The default v0.2 auditor set with caller-provided complexity
 /// thresholds. The CLI layer derives `thresholds` from
 /// `.holocronrc.toml`'s `[complexity]` section (`#31`).
+///
+/// `cargo-mutants` is NOT included by default — it's opt-in via
+/// [`default_set_partitioned`] with `include_mutants = true`.
+/// Rationale (#32): cargo-mutants takes 30min-many-hours on real
+/// workspaces and isn't appropriate for every audit.
 #[must_use]
 pub fn default_set_with_thresholds(
     thresholds: ComplexityThresholds,
@@ -58,9 +65,13 @@ pub fn default_set_with_thresholds(
 ///     turned off, ready to splice into the `RunOutcome`. The grader
 ///     will mark each affected category as Skipped.
 ///
+/// When `include_mutants` is true, the cargo-mutants auditor is added
+/// to the candidate set before partitioning. It still respects the rc
+/// `[auditors].cargo-mutants = false` opt-out (#32).
+///
 /// CLI usage:
 /// ```ignore
-/// let (enabled, disabled) = default_set_partitioned(thresholds, &rc.auditors);
+/// let (enabled, disabled) = default_set_partitioned(thresholds, &rc.auditors, args.with_mutants);
 /// for a in enabled { runner = runner.with_auditor(a); }
 /// let mut outcome = runner.run().await?;
 /// outcome.auditor_results.extend(disabled);
@@ -69,8 +80,12 @@ pub fn default_set_with_thresholds(
 pub fn default_set_partitioned(
     thresholds: ComplexityThresholds,
     rc: &holocron_core::AuditorsConfig,
+    include_mutants: bool,
 ) -> (Vec<Arc<dyn holocron_core::Auditor>>, Vec<AuditorResult>) {
-    let all = default_set_with_thresholds(thresholds);
+    let mut all = default_set_with_thresholds(thresholds);
+    if include_mutants {
+        all.push(Arc::new(MutantsAuditor));
+    }
     let mut enabled: Vec<Arc<dyn holocron_core::Auditor>> = Vec::with_capacity(all.len());
     let mut disabled: Vec<AuditorResult> = Vec::new();
     for a in all {
@@ -94,6 +109,7 @@ fn is_disabled(name: &str, rc: &holocron_core::AuditorsConfig) -> bool {
         "cargo-deny" => rc.cargo_deny,
         "cargo-outdated" => rc.cargo_outdated,
         "cargo-geiger" => rc.cargo_geiger,
+        "cargo-mutants" => rc.cargo_mutants,
         "rust-code-analysis" => rc.rust_code_analysis,
         _ => return false, // unknown auditor name — never disable by accident
     };
@@ -124,8 +140,11 @@ mod tests {
     }
     #[test]
     fn default_partition_with_empty_rc_enables_all_seven() {
-        let (enabled, disabled) =
-            default_set_partitioned(ComplexityThresholds::default(), &AuditorsConfig::default());
+        let (enabled, disabled) = default_set_partitioned(
+            ComplexityThresholds::default(),
+            &AuditorsConfig::default(),
+            false,
+        );
         assert_eq!(enabled.len(), 7);
         assert!(disabled.is_empty());
     }
@@ -133,7 +152,8 @@ mod tests {
     #[test]
     fn rc_disable_drops_auditor_from_enabled_list() {
         let rc = rc_with_disabled(&["cargo-geiger"]);
-        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        let (enabled, disabled) =
+            default_set_partitioned(ComplexityThresholds::default(), &rc, false);
         assert_eq!(enabled.len(), 6);
         assert_eq!(disabled.len(), 1);
         assert_eq!(disabled[0].auditor, "cargo-geiger");
@@ -146,7 +166,8 @@ mod tests {
         // cargo-geiger = true should keep it enabled (opt-out semantic;
         // explicit true is the same as missing).
         let rc = AuditorsConfig { cargo_geiger: Some(true), ..AuditorsConfig::default() };
-        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        let (enabled, disabled) =
+            default_set_partitioned(ComplexityThresholds::default(), &rc, false);
         assert_eq!(enabled.len(), 7);
         assert!(disabled.is_empty());
     }
@@ -162,7 +183,8 @@ mod tests {
             "cargo-geiger",
             "rust-code-analysis",
         ]);
-        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        let (enabled, disabled) =
+            default_set_partitioned(ComplexityThresholds::default(), &rc, false);
         assert!(enabled.is_empty());
         assert_eq!(disabled.len(), 7);
         for r in &disabled {

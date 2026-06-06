@@ -116,7 +116,7 @@ impl ComplexityConfig {
     }
 }
 
-/// `[auditors]` — placeholder for #28.
+/// `[auditors]` — toggle individual auditors on/off (#28, #32).
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditorsConfig {
@@ -131,6 +131,14 @@ pub struct AuditorsConfig {
     pub cargo_outdated: Option<bool>,
     #[serde(rename = "cargo-geiger")]
     pub cargo_geiger: Option<bool>,
+    /// Opt-in mutation testing (#32). Not run by default; even when
+    /// set to `true` here, the CLI's `--with-mutants` flag must also
+    /// be passed for cargo-mutants to be added to the audit set.
+    /// Setting this to `false` is the explicit kill switch (e.g. in
+    /// a project rc) so it won't run even if a user passes
+    /// `--with-mutants`.
+    #[serde(rename = "cargo-mutants")]
+    pub cargo_mutants: Option<bool>,
     #[serde(rename = "rust-code-analysis")]
     pub rust_code_analysis: Option<bool>,
 }
