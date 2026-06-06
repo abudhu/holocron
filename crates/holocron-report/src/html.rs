@@ -678,7 +678,7 @@ mod tests {
             auditors.push(AuditorResult::ok(
                 AuditorMeta { name, category: cat },
                 findings,
-                Duration::from_millis(1000),
+                Duration::from_secs(1),
             ));
         }
         let outcome = RunOutcome {
