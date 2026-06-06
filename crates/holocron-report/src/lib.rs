@@ -3,9 +3,11 @@
 
 pub mod json;
 pub mod markdown;
+pub mod sarif;
 
 pub use json::render_json;
 pub use markdown::render_markdown;
+pub use sarif::render_sarif;
 
 use holocron_core::{Finding, GradeReport, RunOutcome};
 use serde::{Deserialize, Serialize};

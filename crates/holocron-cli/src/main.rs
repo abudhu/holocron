@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use holocron_auditors::default_set;
 use holocron_core::{CategoryScore, Grade, GradeReport, Letter, Runner};
-use holocron_report::{render_json, render_markdown, Report};
+use holocron_report::{render_json, render_markdown, render_sarif, Report};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -78,6 +78,13 @@ struct AuditArgs {
     /// Skip the JSON sidecar.
     #[arg(long)]
     no_json: bool,
+
+    /// Also emit a SARIF v2.1.0 sidecar alongside the Markdown + JSON.
+    /// Default off — SARIF is for downstream code-scanning consumers
+    /// (GitHub Code Scanning, Azure DevOps), and most users don't need
+    /// it. Output path: same stem as --output but with `.sarif`.
+    #[arg(long)]
+    sarif: bool,
 
     /// Install any auditor binaries that aren't on PATH (cargo-audit,
     /// cargo-machete, rust-code-analysis-cli). Default false — Holocron
@@ -327,8 +334,8 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     let grade = Grade::new(&outcome.auditor_results).compute();
     let report = Report::new(&outcome, &grade);
 
-    let (md_path, json_path) = write_reports(&report, &target, &args)?;
-    print_summary(&grade, &md_path, json_path.as_deref());
+    let written = write_reports(&report, &target, &args)?;
+    print_summary(&grade, &written);
 
     // Decide exit code + emit the right user-facing banner.
     //
@@ -417,14 +424,9 @@ fn build_runner(target: &Path, args: &AuditArgs) -> Runner {
     runner
 }
 
-/// Render the Markdown report (always) and JSON sidecar (unless `--no-json`).
-/// Returns the paths written. Either is rooted at `--output` if set, otherwise
-/// at `/tmp/holocron-<slug>-<ts>.{md,json}`.
-fn write_reports(
-    report: &Report<'_>,
-    target: &Path,
-    args: &AuditArgs,
-) -> Result<(PathBuf, Option<PathBuf>)> {
+/// Render the Markdown report (always), JSON sidecar (unless `--no-json`),
+/// and SARIF sidecar (if `--sarif`). Returns the paths written.
+fn write_reports(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<WrittenPaths> {
     let md_path = args.output.clone().unwrap_or_else(|| default_report_path(target, "md"));
     let md = render_markdown(report);
     std::fs::write(&md_path, &md)
@@ -443,12 +445,31 @@ fn write_reports(
         Some(p)
     };
 
-    Ok((md_path, json_path))
+    let sarif_path = if args.sarif {
+        let p = args
+            .output
+            .as_ref()
+            .map_or_else(|| default_report_path(target, "sarif"), |o| o.with_extension("sarif"));
+        let sarif = render_sarif(report).context("serializing SARIF sidecar")?;
+        std::fs::write(&p, sarif)
+            .with_context(|| format!("writing SARIF sidecar to {}", p.display()))?;
+        Some(p)
+    } else {
+        None
+    };
+
+    Ok(WrittenPaths { md: md_path, json: json_path, sarif: sarif_path })
+}
+
+struct WrittenPaths {
+    md: PathBuf,
+    json: Option<PathBuf>,
+    sarif: Option<PathBuf>,
 }
 
 /// Print the final grade card to stdout. Matches the layout users expect from
 /// every Holocron run.
-fn print_summary(grade: &holocron_core::GradeReport, md_path: &Path, json_path: Option<&Path>) {
+fn print_summary(grade: &holocron_core::GradeReport, paths: &WrittenPaths) {
     println!();
     println!("===============================================");
     println!("  Grade: {}  ({:.2})", grade.overall_letter, grade.overall_score);
@@ -473,9 +494,12 @@ fn print_summary(grade: &holocron_core::GradeReport, md_path: &Path, json_path: 
         }
     }
     println!();
-    println!("  Markdown report: {}", md_path.display());
-    if let Some(jp) = json_path {
+    println!("  Markdown report: {}", paths.md.display());
+    if let Some(jp) = &paths.json {
         println!("  JSON sidecar:    {}", jp.display());
+    }
+    if let Some(sp) = &paths.sarif {
+        println!("  SARIF sidecar:   {}", sp.display());
     }
     println!("===============================================");
 }
