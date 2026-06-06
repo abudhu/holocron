@@ -30,7 +30,7 @@ jobs:
   - type: CommandStep
     name: lint buildspec for at-sign hazards
     runInContainer: true
-    image: bash:5
+    image: debian:bookworm-slim
     runAs: '0:0'
     interpreter:
       type: ShellInterpreter
