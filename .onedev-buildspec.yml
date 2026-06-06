@@ -39,7 +39,11 @@ jobs:
     image: rust:1.84-bookworm
     runAs: '0:0'
     interpreter:
-      type: DefaultInterpreter
+      # DefaultInterpreter executes the script with /bin/sh (dash on
+      # Debian), which does NOT support `set -o pipefail`. Force bash
+      # via the shebang so we get bash semantics throughout.
+      type: ShellInterpreter
+      shell: /bin/bash
       commands: |
         set -euxo pipefail
         rustc --version
