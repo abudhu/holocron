@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use holocron_auditors::{default_set_partitioned, ComplexityThresholds};
 use holocron_core::{Category, CategoryScore, Grade, GradeReport, Letter, Runner};
-use holocron_report::{render_json, render_markdown, render_sarif, Report};
+use holocron_report::{render_html, render_json, render_markdown, render_sarif, Report};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -122,6 +122,14 @@ struct AuditArgs {
     /// it. Output path: same stem as --output but with `.sarif`.
     #[arg(long)]
     sarif: bool,
+
+    /// Also emit a self-contained HTML report alongside the Markdown +
+    /// JSON. Single file, inlined CSS, no JavaScript — designed for
+    /// sharing audit results with non-engineers (PM/security/leadership)
+    /// without needing a markdown renderer. Output path: same stem as
+    /// --output but with `.html`.
+    #[arg(long)]
+    html: bool,
 
     /// Install any auditor binaries that aren't on PATH (cargo-audit,
     /// cargo-machete, rust-code-analysis-cli). Without this flag we
@@ -703,12 +711,14 @@ fn warn_if_weights_skewed(weights: &[(Category, f64); 5]) {
 }
 
 /// Render the Markdown report (always), JSON sidecar (unless `--no-json`),
-/// and SARIF sidecar (if `--sarif`). Returns the paths written.
+/// SARIF sidecar (if `--sarif`), and HTML sidecar (if `--html`).
+/// Returns the paths written.
 fn write_reports(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<WrittenPaths> {
     let md = write_markdown(report, target, args)?;
     let json = write_json(report, target, args)?;
     let sarif = write_sarif_sidecar(report, target, args)?;
-    Ok(WrittenPaths { md, json, sarif })
+    let html = write_html_sidecar(report, target, args)?;
+    Ok(WrittenPaths { md, json, sarif, html })
 }
 
 fn write_markdown(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<PathBuf> {
@@ -751,10 +761,29 @@ fn write_sarif_sidecar(
     Ok(Some(path))
 }
 
+fn write_html_sidecar(
+    report: &Report<'_>,
+    target: &Path,
+    args: &AuditArgs,
+) -> Result<Option<PathBuf>> {
+    if !args.html {
+        return Ok(None);
+    }
+    let path = args
+        .output
+        .as_ref()
+        .map_or_else(|| default_report_path(target, "html"), |o| o.with_extension("html"));
+    let body = render_html(report);
+    std::fs::write(&path, body)
+        .with_context(|| format!("writing HTML report to {}", path.display()))?;
+    Ok(Some(path))
+}
+
 struct WrittenPaths {
     md: PathBuf,
     json: Option<PathBuf>,
     sarif: Option<PathBuf>,
+    html: Option<PathBuf>,
 }
 
 /// Print the final grade card to stdout. Matches the layout users expect from
@@ -790,6 +819,9 @@ fn print_summary(grade: &holocron_core::GradeReport, paths: &WrittenPaths) {
     }
     if let Some(sp) = &paths.sarif {
         println!("  SARIF sidecar:   {}", sp.display());
+    }
+    if let Some(hp) = &paths.html {
+        println!("  HTML report:     {}", hp.display());
     }
     println!("===============================================");
 }

@@ -1,10 +1,12 @@
 //! Report rendering for Holocron — Markdown for humans/LLMs, JSON for
 //! machines (CI gates, downstream tooling, future SARIF conversion).
 
+pub mod html;
 pub mod json;
 pub mod markdown;
 pub mod sarif;
 
+pub use html::render_html;
 pub use json::render_json;
 pub use markdown::render_markdown;
 pub use sarif::render_sarif;
