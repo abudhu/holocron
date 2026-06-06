@@ -160,6 +160,7 @@ jobs:
         install_one cargo-machete "cargo-machete"
         install_one cargo-deny "cargo-deny"
         install_one cargo-outdated "cargo-outdated"
+        install_one cargo-geiger "cargo-geiger"
         install_one rust-code-analysis-cli "--git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli"
 
         echo "=== installed binaries ==="

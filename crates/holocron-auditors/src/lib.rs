@@ -5,6 +5,7 @@
 
 pub mod clippy;
 pub mod deny;
+pub mod geiger;
 pub mod machete;
 pub mod outdated;
 pub mod rust_code_analysis;
@@ -12,6 +13,7 @@ pub mod rustsec;
 
 pub use clippy::ClippyAuditor;
 pub use deny::DenyAuditor;
+pub use geiger::GeigerAuditor;
 pub use machete::MacheteAuditor;
 pub use outdated::OutdatedAuditor;
 pub use rust_code_analysis::{ComplexityAuditor, ComplexityThresholds};
@@ -30,5 +32,6 @@ pub fn default_set() -> Vec<Arc<dyn holocron_core::Auditor>> {
         Arc::new(ComplexityAuditor { thresholds: ComplexityThresholds::default() }),
         Arc::new(DenyAuditor),
         Arc::new(OutdatedAuditor),
+        Arc::new(GeigerAuditor),
     ]
 }
