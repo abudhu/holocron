@@ -1,3 +1,16 @@
+## OneDev buildspec gotcha — DO NOT use bare `@` in any commands block
+##
+## OneDev's buildspec validator treats the at-sign as a variable-interpolation
+## delimiter (`@varname@`). An unpaired bare at-sign anywhere in a step's
+## `commands:` block — including bash `$@`, `${array[@]}`, or even literal
+## at-signs in comments — invalidates the ENTIRE spec. When that happens,
+## `BranchUpdateTrigger` silently stops firing on push and the only diagnostic
+## is to click "Run" manually in the OneDev UI.
+##
+## See `scripts/check-buildspec-atsigns.sh` for the pre-commit guard.
+## See holocron issue #25 for the doc + onedev-ci skill pitfall #11 for the
+## full diagnosis playbook.
+
 version: 47
 jobs:
 - name: CI
@@ -8,6 +21,24 @@ jobs:
       type: DefaultCredential
     withLfs: false
     withSubmodules: false
+    condition: SUCCESSFUL
+  # Pre-flight: catch the OneDev buildspec `@` parser gotcha BEFORE the
+  # rest of the job spends real time (clone + cargo cache + compile).
+  # If someone reintroduces `$@` or similar, fail loudly here so the
+  # diagnostic isn't "BranchUpdateTrigger silently stopped firing" 30
+  # minutes from now. See holocron issue #25.
+  - type: CommandStep
+    name: lint buildspec for at-sign hazards
+    runInContainer: true
+    image: bash:5
+    runAs: '0:0'
+    interpreter:
+      type: ShellInterpreter
+      shell: /bin/bash
+      commands: |
+        set -euo pipefail
+        ./scripts/check-buildspec-atsigns.sh .onedev-buildspec.yml
+    useTTY: false
     condition: SUCCESSFUL
   # Cargo registry + git index cache. Key has no checksum-files so it's
   # always a partial-match restore — registry index churns frequently
@@ -155,6 +186,16 @@ jobs:
         export CARGO_HOME="$(pwd)/.cargo-home"
         export CARGO_TARGET_DIR="$(pwd)/target"
         export PATH="$CARGO_HOME/bin:$PATH"
+
+        # Pre-warm rustup: the per-step CARGO_HOME has the auditor bins
+        # but no toolchain symlinks. When holocron's clippy/cargo-audit
+        # auditors fire in parallel they each trigger a rustup sync and
+        # race on the .partial rename in /usr/local/rustup/downloads.
+        # Force ONE sequential sync up-front so the toolchain is warm
+        # before the parallel auditors hit it.
+        echo "=== pre-warm rustup toolchain ==="
+        cargo --version
+        rustup component add clippy 2>/dev/null || true
 
         echo "=== holocron audits holocron ==="
         ./target/release/holocron audit . --fail-below A-
