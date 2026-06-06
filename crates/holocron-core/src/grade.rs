@@ -187,12 +187,16 @@ impl GradeReport {
 /// Compute a grade report from a set of auditor results.
 pub struct Grade<'a> {
     results: &'a [AuditorResult],
+    weights: [(Category, f64); 5],
 }
 
 impl<'a> Grade<'a> {
-    /// Weights for each category in the overall score. Must sum to 1.0.
-    /// Security dominates because a CVE is a more existential risk than
-    /// a complexity hotspot.
+    /// Default weights for each category in the overall score. Sums to
+    /// 1.0. Security dominates because a CVE is a more existential risk
+    /// than a complexity hotspot.
+    ///
+    /// Override at runtime via [`Grade::with_weights`] — the CLI wires
+    /// `.holocronrc.toml`'s `[weights]` section through this path (#30).
     pub const CATEGORY_WEIGHTS: [(Category, f64); 5] = [
         (Category::Security, 0.30),
         (Category::Lints, 0.20),
@@ -203,7 +207,19 @@ impl<'a> Grade<'a> {
 
     #[must_use]
     pub const fn new(results: &'a [AuditorResult]) -> Self {
-        Self { results }
+        Self { results, weights: Self::CATEGORY_WEIGHTS }
+    }
+
+    /// Override the per-category weights (e.g. from
+    /// `.holocronrc.toml`'s `[weights]` section). Weights need not sum
+    /// to 1.0 — the renormalization in [`Grade::compute`] (originally
+    /// for skipped categories) handles any positive scale. Callers
+    /// SHOULD warn the user when the sum drifts far from 1.0 since the
+    /// reported overall is then on a non-intuitive scale.
+    #[must_use]
+    pub const fn with_weights(mut self, weights: [(Category, f64); 5]) -> Self {
+        self.weights = weights;
+        self
     }
 
     /// Compute the full grade report.
@@ -220,7 +236,7 @@ impl<'a> Grade<'a> {
             Category::ALL.iter().map(|&cat| self.category_score(cat)).collect();
 
         let (weighted_sum, total_weight) =
-            Self::CATEGORY_WEIGHTS.iter().fold((0.0_f64, 0.0_f64), |(s, w), (cat, weight)| {
+            self.weights.iter().fold((0.0_f64, 0.0_f64), |(s, w), (cat, weight)| {
                 by_category.iter().find(|cs| cs.category() == *cat).map_or((s, w), |cs| match cs {
                     CategoryScore::Graded { score, .. } => (s + score * weight, w + weight),
                     CategoryScore::Skipped { .. } => (s, w),

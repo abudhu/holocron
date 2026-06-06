@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use holocron_auditors::{default_set_partitioned, ComplexityThresholds};
-use holocron_core::{CategoryScore, Grade, GradeReport, Letter, Runner};
+use holocron_core::{Category, CategoryScore, Grade, GradeReport, Letter, Runner};
 use holocron_report::{render_json, render_markdown, render_sarif, Report};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -368,7 +368,13 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
         build_runner(&target, &args, enabled).run().await.context("running auditors")?;
     outcome.auditor_results.extend(disabled_results);
 
-    let grade = Grade::new(&outcome.auditor_results).compute();
+    // Merge [weights] from rc onto built-in defaults (#30). Missing keys
+    // keep defaults. We warn if the sum drifts > 0.01 from 1.0 because
+    // the report scale becomes non-intuitive (overall still computes
+    // because Grade::compute renormalizes — see the with_weights doc).
+    let weights = merge_weights(&rc.weights);
+    warn_if_weights_skewed(&weights);
+    let grade = Grade::new(&outcome.auditor_results).with_weights(weights).compute();
     let report = Report::new(&outcome, &grade);
 
     let written = write_reports(&report, &target, &args)?;
@@ -482,6 +488,40 @@ fn merge_complexity_thresholds(rc: &holocron_core::ComplexityConfig) -> Complexi
         t.cognitive_high = v;
     }
     t
+}
+
+/// Merge rc-provided category weights onto the built-in defaults. Any
+/// missing rc key keeps the default. Returns the 5-tuple in the same
+/// canonical category order as `Grade::CATEGORY_WEIGHTS`.
+fn merge_weights(rc: &holocron_core::WeightsConfig) -> [(Category, f64); 5] {
+    let mut weights = Grade::CATEGORY_WEIGHTS;
+    for (cat, w) in &mut weights {
+        let override_val = match cat {
+            Category::Security => rc.security,
+            Category::Lints => rc.lints,
+            Category::Complexity => rc.complexity,
+            Category::DeadCode => rc.dead_code,
+            Category::Maintenance => rc.maintenance,
+        };
+        if let Some(v) = override_val {
+            *w = v;
+        }
+    }
+    weights
+}
+
+/// Emit a one-line warning to stderr if the weights sum is far from 1.0.
+/// The grader renormalizes either way (`Grade::compute` already does it
+/// for Skipped categories), but a sum of e.g. 5.0 means the reported
+/// overall is on a non-intuitive scale.
+fn warn_if_weights_skewed(weights: &[(Category, f64); 5]) {
+    let sum: f64 = weights.iter().map(|(_, w)| w).sum();
+    if (sum - 1.0).abs() > 0.01 {
+        eprintln!(
+            "WARNING: [weights] in .holocronrc.toml sum to {sum:.3}, not 1.0. \
+             Grade will be renormalized, but the reported scale may be unintuitive."
+        );
+    }
 }
 
 /// Render the Markdown report (always), JSON sidecar (unless `--no-json`),
@@ -909,5 +949,53 @@ mod tests {
         };
         let merged = merge_complexity_thresholds(&rc);
         assert_eq!(merged.cognitive_high, 50, "cognitive_high overridden by rc (#37)");
+    }
+
+    #[test]
+    fn merge_weights_defaults_when_rc_empty() {
+        // Empty rc -> defaults preserved (Security 0.30, Lints 0.20,
+        // Complexity 0.20, DeadCode 0.15, Maintenance 0.15).
+        let rc = holocron_core::WeightsConfig::default();
+        let merged = merge_weights(&rc);
+        assert_eq!(merged, Grade::CATEGORY_WEIGHTS);
+    }
+
+    #[test]
+    fn merge_weights_overrides_specified_categories() {
+        // Partial override: only Security set; others keep default.
+        let rc = holocron_core::WeightsConfig {
+            security: Some(0.50),
+            lints: None,
+            complexity: None,
+            dead_code: None,
+            maintenance: None,
+        };
+        let merged = merge_weights(&rc);
+        let sec = merged.iter().find(|(c, _)| *c == Category::Security).unwrap().1;
+        let lints = merged.iter().find(|(c, _)| *c == Category::Lints).unwrap().1;
+        assert!((sec - 0.50).abs() < 1e-9, "Security overridden");
+        assert!((lints - 0.20).abs() < 1e-9, "Lints unchanged");
+    }
+
+    #[test]
+    fn merge_weights_full_override() {
+        // Full override of every category; verify all 5 land.
+        let rc = holocron_core::WeightsConfig {
+            security: Some(0.10),
+            lints: Some(0.10),
+            complexity: Some(0.10),
+            dead_code: Some(0.35),
+            maintenance: Some(0.35),
+        };
+        let merged = merge_weights(&rc);
+        let by_cat = |c: Category| merged.iter().find(|(x, _)| *x == c).unwrap().1;
+        assert!((by_cat(Category::Security) - 0.10).abs() < 1e-9);
+        assert!((by_cat(Category::Lints) - 0.10).abs() < 1e-9);
+        assert!((by_cat(Category::Complexity) - 0.10).abs() < 1e-9);
+        assert!((by_cat(Category::DeadCode) - 0.35).abs() < 1e-9);
+        assert!((by_cat(Category::Maintenance) - 0.35).abs() < 1e-9);
+        // And the result sums to 1.0.
+        let sum: f64 = merged.iter().map(|(_, w)| w).sum();
+        assert!((sum - 1.0).abs() < 1e-9);
     }
 }
