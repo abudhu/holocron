@@ -11,7 +11,15 @@ use holocron_core::{Finding, GradeReport, RunOutcome};
 use serde::{Deserialize, Serialize};
 
 /// Schema version for the JSON sidecar. Bump on breaking changes.
-pub const JSON_SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// * `1` — initial shape. `grade.by_category[*]` was a flat object with
+///   `category`, `score`, `letter`, `finding_count`.
+/// * `2` — `grade.by_category[*]` became a tagged union with
+///   `kind: "graded" | "skipped"`. `graded` keeps the v1 fields;
+///   `skipped` carries `category` + `reason`. Driven by holocron #24
+///   (the silent `B 0.85` fallback for failed auditors).
+pub const JSON_SCHEMA_VERSION: u32 = 2;
 
 /// Header carried by both report formats.
 #[derive(Debug, Clone, Serialize, Deserialize)]

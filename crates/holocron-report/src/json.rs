@@ -121,4 +121,38 @@ mod tests {
         assert!(v["grade"]["overall_letter"].is_string());
         assert_eq!(v["auditor_results"][0]["auditor"], "clippy");
     }
+
+    #[test]
+    fn json_by_category_uses_tagged_union_kind() {
+        // #24: skipped categories must surface as a distinct shape in
+        // the JSON sidecar so downstream tooling (CI consumers, SARIF
+        // converters, future `holocron explain`) can branch on it
+        // without inferring from finding_count + score heuristics.
+        let outcome = RunOutcome {
+            target: std::path::PathBuf::from("/tmp/proj"),
+            started_at: chrono::Utc::now(),
+            total_duration: std::time::Duration::ZERO,
+            auditor_results: vec![AuditorResult::failed(
+                AuditorMeta { name: "cargo-audit", category: Category::Security },
+                "boom: network unreachable",
+                std::time::Duration::from_millis(1),
+            )],
+        };
+        let grade = Grade::new(&outcome.auditor_results).compute();
+        let report = Report::new(&outcome, &grade);
+        let v: serde_json::Value = serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+
+        let by_cat = v["grade"]["by_category"].as_array().expect("by_category is an array");
+        let security =
+            by_cat.iter().find(|c| c["category"] == "Security").expect("Security in by_category");
+        assert_eq!(security["kind"], "skipped", "tagged union discriminator must be present");
+        assert!(
+            security["reason"].as_str().unwrap().contains("boom"),
+            "skip reason must surface in JSON, got: {security:?}"
+        );
+        // Confirm graded categories carry the kind tag too.
+        let lints = by_cat.iter().find(|c| c["category"] == "Lints").expect("Lints in by_category");
+        assert_eq!(lints["kind"], "graded");
+        assert!(lints["score"].is_number(), "Graded variant must keep the score field");
+    }
 }
