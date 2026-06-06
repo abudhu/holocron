@@ -52,7 +52,7 @@
 # cyclomatic_medium = 15
 # cyclomatic_high   = 25
 # cognitive_medium  = 20
-# cognitive_high    = 35   # reserved; no-op today
+# cognitive_high    = 35
 
 # -----------------------------------------------------------------------
 # [[allowlist]] — suppress specific findings

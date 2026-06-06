@@ -17,11 +17,12 @@ pub struct ComplexityThresholds {
     pub cyclomatic_warn: u32,
     pub cyclomatic_high: u32,
     pub cognitive_warn: u32,
+    pub cognitive_high: u32,
 }
 
 impl Default for ComplexityThresholds {
     fn default() -> Self {
-        Self { cyclomatic_warn: 15, cyclomatic_high: 25, cognitive_warn: 20 }
+        Self { cyclomatic_warn: 15, cyclomatic_high: 25, cognitive_warn: 20, cognitive_high: 35 }
     }
 }
 
@@ -158,10 +159,13 @@ fn walk_spaces(
     // don't want to double-count them as findings (they aggregate the
     // function totals).
     if matches!(space.kind.as_str(), "function" | "method" | "closure") {
-        let severity = if cyclomatic >= thresholds.cyclomatic_high {
+        let high_breach =
+            cyclomatic >= thresholds.cyclomatic_high || cognitive >= thresholds.cognitive_high;
+        let medium_breach =
+            cyclomatic >= thresholds.cyclomatic_warn || cognitive >= thresholds.cognitive_warn;
+        let severity = if high_breach {
             Severity::High
-        } else if cyclomatic >= thresholds.cyclomatic_warn || cognitive >= thresholds.cognitive_warn
-        {
+        } else if medium_breach {
             Severity::Medium
         } else {
             Severity::Info
@@ -175,22 +179,19 @@ fn walk_spaces(
             );
             let loc = Location::at(&display_path, space.start_line);
             let detail = format!(
-                "Thresholds: cyclomatic warn ≥ {}, high ≥ {}; cognitive warn ≥ {}.\n\
+                "Thresholds: cyclomatic warn ≥ {}, high ≥ {}; cognitive warn ≥ {}, high ≥ {}.\n\
                  Function spans lines {}–{} ({} lines).",
                 thresholds.cyclomatic_warn,
                 thresholds.cyclomatic_high,
                 thresholds.cognitive_warn,
+                thresholds.cognitive_high,
                 space.start_line,
                 space.end_line,
                 space.end_line.saturating_sub(space.start_line) + 1,
             );
             out.push(
                 Finding::new("rust-code-analysis", Category::Complexity, severity, msg)
-                    .with_code(if cyclomatic >= thresholds.cyclomatic_high {
-                        "complexity-high"
-                    } else {
-                        "complexity-warn"
-                    })
+                    .with_code(if high_breach { "complexity-high" } else { "complexity-warn" })
                     .with_detail(detail)
                     .with_location(loc),
             );
@@ -383,6 +384,63 @@ mod tests {
         let file = FileMetrics {
             name: "/tmp/proj/src/lib.rs".to_string(),
             spaces: vec![space("medium_fn", "function", 18, 5)],
+            metrics: Metrics::default(),
+            kind: "unit".to_string(),
+            start_line: 1,
+            end_line: 50,
+        };
+        let mut findings = vec![];
+        collect_hotspots(
+            &file,
+            Path::new("/tmp/proj"),
+            &ComplexityThresholds::default(),
+            &mut findings,
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn high_cognitive_alone_promotes_to_high_severity() {
+        // #37: high cognitive (>= cognitive_high) must trigger High
+        // severity even when cyclomatic is below cyclomatic_high.
+        // Default cog_high=35; pick 40 cog with cyc=10 (below both
+        // cyc thresholds — proves cognitive is the trigger).
+        let file = FileMetrics {
+            name: "/tmp/proj/src/lib.rs".to_string(),
+            spaces: vec![space("cognitive_heavy", "function", 10, 40)],
+            metrics: Metrics::default(),
+            kind: "unit".to_string(),
+            start_line: 1,
+            end_line: 50,
+        };
+        let mut findings = vec![];
+        collect_hotspots(
+            &file,
+            Path::new("/tmp/proj"),
+            &ComplexityThresholds::default(),
+            &mut findings,
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].severity,
+            Severity::High,
+            "cognitive >= cognitive_high should trigger High"
+        );
+        assert_eq!(
+            findings[0].code.as_deref(),
+            Some("complexity-high"),
+            "code should be complexity-high, not complexity-warn"
+        );
+    }
+
+    #[test]
+    fn cognitive_warn_alone_still_medium() {
+        // Confirm the pre-existing behavior: cognitive between warn and
+        // high (e.g. 25 with default warn=20 high=35) stays Medium.
+        let file = FileMetrics {
+            name: "/tmp/proj/src/lib.rs".to_string(),
+            spaces: vec![space("cognitive_medium", "function", 5, 25)],
             metrics: Metrics::default(),
             kind: "unit".to_string(),
             start_line: 1,

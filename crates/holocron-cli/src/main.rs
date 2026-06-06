@@ -465,8 +465,9 @@ fn merge_complexity_thresholds(rc: &holocron_core::ComplexityConfig) -> Complexi
     if let Some(v) = rc.cognitive_medium {
         t.cognitive_warn = v;
     }
-    // cognitive_high is reserved for a follow-up (see ComplexityConfig
-    // doc) — ignored here even when set in rc, by design.
+    if let Some(v) = rc.cognitive_high {
+        t.cognitive_high = v;
+    }
     t
 }
 
@@ -885,21 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn merge_thresholds_ignores_cognitive_high_today() {
-        // cognitive_high is reserved for a follow-up. Setting it in rc
-        // must NOT change the merged thresholds.
+    fn merge_thresholds_honors_cognitive_high_now() {
+        // #37 closed the no-op gap: cognitive_high IS wired through.
         let rc = holocron_core::ComplexityConfig {
             cyclomatic_medium: None,
             cyclomatic_high: None,
             cognitive_medium: None,
-            cognitive_high: Some(99),
+            cognitive_high: Some(50),
         };
         let merged = merge_complexity_thresholds(&rc);
-        let defaults = ComplexityThresholds::default();
-        // No new field for cognitive_high yet — assert the existing 3
-        // are unchanged.
-        assert_eq!(merged.cyclomatic_warn, defaults.cyclomatic_warn);
-        assert_eq!(merged.cyclomatic_high, defaults.cyclomatic_high);
-        assert_eq!(merged.cognitive_warn, defaults.cognitive_warn);
+        assert_eq!(merged.cognitive_high, 50, "cognitive_high overridden by rc (#37)");
     }
 }
