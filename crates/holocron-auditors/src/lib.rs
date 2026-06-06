@@ -21,6 +21,8 @@ pub use rustsec::RustSecAuditor;
 
 use std::sync::Arc;
 
+use holocron_core::AuditorResult;
+
 /// The default v0.2 auditor set with no config-driven overrides.
 /// Equivalent to [`default_set_with_thresholds`] called with
 /// [`ComplexityThresholds::default()`].
@@ -45,4 +47,126 @@ pub fn default_set_with_thresholds(
         Arc::new(OutdatedAuditor),
         Arc::new(GeigerAuditor),
     ]
+}
+
+/// Partition the default set against an `[auditors]` rc section.
+///
+/// Returns:
+///   * `enabled`: auditors the runner should execute (rc set them to
+///     `true` or didn't mention them — opt-out, not opt-in).
+///   * `disabled`: synthetic Skipped results for the auditors the rc
+///     turned off, ready to splice into the `RunOutcome`. The grader
+///     will mark each affected category as Skipped.
+///
+/// CLI usage:
+/// ```ignore
+/// let (enabled, disabled) = default_set_partitioned(thresholds, &rc.auditors);
+/// for a in enabled { runner = runner.with_auditor(a); }
+/// let mut outcome = runner.run().await?;
+/// outcome.auditor_results.extend(disabled);
+/// ```
+#[must_use]
+pub fn default_set_partitioned(
+    thresholds: ComplexityThresholds,
+    rc: &holocron_core::AuditorsConfig,
+) -> (Vec<Arc<dyn holocron_core::Auditor>>, Vec<AuditorResult>) {
+    let all = default_set_with_thresholds(thresholds);
+    let mut enabled: Vec<Arc<dyn holocron_core::Auditor>> = Vec::with_capacity(all.len());
+    let mut disabled: Vec<AuditorResult> = Vec::new();
+    for a in all {
+        let meta = a.meta();
+        if is_disabled(meta.name, rc) {
+            disabled.push(AuditorResult::skipped_disabled(meta));
+        } else {
+            enabled.push(a);
+        }
+    }
+    (enabled, disabled)
+}
+
+/// Returns true when the rc explicitly disables the named auditor.
+/// Missing keys default to enabled (opt-out semantic).
+fn is_disabled(name: &str, rc: &holocron_core::AuditorsConfig) -> bool {
+    let key = match name {
+        "clippy" => rc.clippy,
+        "cargo-audit" => rc.cargo_audit,
+        "cargo-machete" => rc.cargo_machete,
+        "cargo-deny" => rc.cargo_deny,
+        "cargo-outdated" => rc.cargo_outdated,
+        "cargo-geiger" => rc.cargo_geiger,
+        "rust-code-analysis" => rc.rust_code_analysis,
+        _ => return false, // unknown auditor name — never disable by accident
+    };
+    matches!(key, Some(false))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use holocron_core::{AuditorsConfig, RunStatus};
+
+    fn rc_with_disabled(names: &[&str]) -> AuditorsConfig {
+        let mut rc = AuditorsConfig::default();
+        for n in names {
+            match *n {
+                "clippy" => rc.clippy = Some(false),
+                "cargo-audit" => rc.cargo_audit = Some(false),
+                "cargo-machete" => rc.cargo_machete = Some(false),
+                "cargo-deny" => rc.cargo_deny = Some(false),
+                "cargo-outdated" => rc.cargo_outdated = Some(false),
+                "cargo-geiger" => rc.cargo_geiger = Some(false),
+                "rust-code-analysis" => rc.rust_code_analysis = Some(false),
+                other => panic!("unknown auditor name in test: {other}"),
+            }
+        }
+        rc
+    }
+    #[test]
+    fn default_partition_with_empty_rc_enables_all_seven() {
+        let (enabled, disabled) =
+            default_set_partitioned(ComplexityThresholds::default(), &AuditorsConfig::default());
+        assert_eq!(enabled.len(), 7);
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn rc_disable_drops_auditor_from_enabled_list() {
+        let rc = rc_with_disabled(&["cargo-geiger"]);
+        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        assert_eq!(enabled.len(), 6);
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].auditor, "cargo-geiger");
+        assert_eq!(disabled[0].status, RunStatus::SkippedDisabled);
+        assert!(disabled[0].error.as_deref().unwrap().contains(".holocronrc.toml"));
+    }
+
+    #[test]
+    fn rc_explicit_true_does_not_disable() {
+        // cargo-geiger = true should keep it enabled (opt-out semantic;
+        // explicit true is the same as missing).
+        let rc = AuditorsConfig { cargo_geiger: Some(true), ..AuditorsConfig::default() };
+        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        assert_eq!(enabled.len(), 7);
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn rc_disabling_all_seven_yields_empty_enabled() {
+        let rc = rc_with_disabled(&[
+            "clippy",
+            "cargo-audit",
+            "cargo-machete",
+            "cargo-deny",
+            "cargo-outdated",
+            "cargo-geiger",
+            "rust-code-analysis",
+        ]);
+        let (enabled, disabled) = default_set_partitioned(ComplexityThresholds::default(), &rc);
+        assert!(enabled.is_empty());
+        assert_eq!(disabled.len(), 7);
+        for r in &disabled {
+            assert_eq!(r.status, RunStatus::SkippedDisabled);
+        }
+    }
 }

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use holocron_auditors::{default_set_with_thresholds, ComplexityThresholds};
+use holocron_auditors::{default_set_partitioned, ComplexityThresholds};
 use holocron_core::{CategoryScore, Grade, GradeReport, Letter, Runner};
 use holocron_report::{render_json, render_markdown, render_sarif, Report};
 use std::path::{Path, PathBuf};
@@ -336,10 +336,11 @@ fn load_rc_and_merge(target: &Path, flag_fail_below: Option<Letter>) -> Result<R
         None => rc.gate.fail_below_letter().ok().flatten(),
     };
     let thresholds = merge_complexity_thresholds(&rc.complexity);
-    Ok(RcResolution { rc_path, effective_fail_below, thresholds })
+    Ok(RcResolution { rc, rc_path, effective_fail_below, thresholds })
 }
 
 struct RcResolution {
+    rc: holocron_core::HolocronConfig,
     rc_path: Option<PathBuf>,
     effective_fail_below: Option<Letter>,
     thresholds: ComplexityThresholds,
@@ -351,14 +352,22 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
     info!(target = %target.display(), "starting audit");
     println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
 
-    let RcResolution { rc_path, effective_fail_below, thresholds } =
+    let RcResolution { rc, rc_path, effective_fail_below, thresholds } =
         load_rc_and_merge(&target, args.fail_below)?;
     if let Some(p) = &rc_path {
         println!("Config: {}", p.display());
     }
 
-    let outcome =
-        build_runner(&target, &args, thresholds).run().await.context("running auditors")?;
+    // Partition the default set against [auditors] rc. Disabled
+    // auditors produce synthetic Skipped results that we splice into
+    // the outcome after the runner finishes — the grader treats those
+    // categories as Skipped, distinct from missing-binary or runtime
+    // failures (#28).
+    let (enabled, disabled_results) = default_set_partitioned(thresholds, &rc.auditors);
+    let mut outcome =
+        build_runner(&target, &args, enabled).run().await.context("running auditors")?;
+    outcome.auditor_results.extend(disabled_results);
+
     let grade = Grade::new(&outcome.auditor_results).compute();
     let report = Report::new(&outcome, &grade);
 
@@ -441,12 +450,16 @@ fn decide_exit(grade: &GradeReport, threshold: Option<Letter>) -> ExitKind {
     ExitKind::Clean
 }
 
-/// Construct the [`Runner`] with the default auditor set and CLI flags applied.
-fn build_runner(target: &Path, args: &AuditArgs, thresholds: ComplexityThresholds) -> Runner {
+/// Construct the [`Runner`] with the given auditor set and CLI flags applied.
+fn build_runner(
+    target: &Path,
+    args: &AuditArgs,
+    auditors: Vec<std::sync::Arc<dyn holocron_core::Auditor>>,
+) -> Runner {
     let mut runner = Runner::new(target)
         .with_timeout(Duration::from_secs(args.timeout))
         .with_install_missing(args.install_missing);
-    for a in default_set_with_thresholds(thresholds) {
+    for a in auditors {
         runner = runner.with_auditor(a);
     }
     runner

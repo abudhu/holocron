@@ -241,12 +241,28 @@ impl<'a> Grade<'a> {
         // wasn't installed, surface it as Skipped — NOT as a graded
         // fallback. Was #24: the old 0.85 fallback silently masked
         // tooling outages as code-quality signal.
+        //
+        // SPECIAL CASE for #28: a SkippedDisabled (user intent — they
+        // disabled this auditor in rc) does NOT block the category if
+        // ANOTHER auditor for the same category produced Ok results.
+        // Intent != outage. Only when ALL auditors for a category are
+        // degraded (or disabled) does the category become Skipped.
+        let has_ok = self
+            .results
+            .iter()
+            .any(|r| r.category == category && matches!(r.status, RunStatus::Ok));
         let degraded = self.results.iter().find(|r| {
             r.category == category
                 && matches!(
                     r.status,
-                    RunStatus::Failed | RunStatus::TimedOut | RunStatus::SkippedMissing
+                    RunStatus::Failed
+                        | RunStatus::TimedOut
+                        | RunStatus::SkippedMissing
+                        | RunStatus::SkippedDisabled
                 )
+                // SkippedDisabled is intent — only matters if no other
+                // auditor for the category produced Ok results.
+                && !(matches!(r.status, RunStatus::SkippedDisabled) && has_ok)
         });
         if let Some(r) = degraded {
             return CategoryScore::Skipped {
@@ -541,6 +557,65 @@ mod tests {
         assert!(
             matches!(maint, CategoryScore::Skipped { .. }),
             "SkippedMissing auditor should produce Skipped category"
+        );
+    }
+
+    #[test]
+    fn skipped_disabled_with_ok_sibling_keeps_category_graded() {
+        // #28: when ONE auditor in a category is disabled via rc but
+        // another auditor for the same category produced Ok results,
+        // the category stays Graded (intent != outage). Maintenance is
+        // shared by cargo-deny + cargo-outdated; disabling cargo-deny
+        // alone should leave Maintenance graded by cargo-outdated.
+        use crate::AuditorMeta;
+        let results = vec![
+            AuditorResult::ok(
+                AuditorMeta { name: "cargo-outdated", category: Category::Maintenance },
+                vec![],
+                Duration::from_millis(10),
+            ),
+            AuditorResult::skipped_disabled(AuditorMeta {
+                name: "cargo-deny",
+                category: Category::Maintenance,
+            }),
+        ];
+        let report = Grade::new(&results).compute();
+        let maint = report
+            .by_category
+            .iter()
+            .find(|c| c.category() == Category::Maintenance)
+            .expect("Maintenance must be present");
+        assert!(
+            matches!(maint, CategoryScore::Graded { .. }),
+            "Maintenance should stay Graded when cargo-outdated is Ok despite cargo-deny disabled, got: {maint:?}"
+        );
+    }
+
+    #[test]
+    fn skipped_disabled_alone_still_skips_category() {
+        // #28: when ALL auditors for a category are SkippedDisabled,
+        // the category IS Skipped. Disabling every Maintenance auditor
+        // (cargo-deny + cargo-outdated) should still produce Skipped.
+        use crate::AuditorMeta;
+        let results = vec![
+            AuditorResult::skipped_disabled(AuditorMeta {
+                name: "cargo-outdated",
+                category: Category::Maintenance,
+            }),
+            AuditorResult::skipped_disabled(AuditorMeta {
+                name: "cargo-deny",
+                category: Category::Maintenance,
+            }),
+        ];
+        let report = Grade::new(&results).compute();
+        let maint = report
+            .by_category
+            .iter()
+            .find(|c| c.category() == Category::Maintenance)
+            .expect("Maintenance must be present");
+        assert!(
+            matches!(maint, CategoryScore::Skipped { .. }),
+            "Maintenance should be Skipped when all auditors disabled, got: {maint:?}"
         );
     }
 }

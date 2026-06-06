@@ -25,6 +25,11 @@ pub enum RunStatus {
     Ok,
     /// Tool was skipped because the binary is missing and install was disabled.
     SkippedMissing,
+    /// Tool was skipped because the user disabled it in `.holocronrc.toml`.
+    /// Distinct from `SkippedMissing` so grade output can distinguish
+    /// "couldn't measure" (operational gap) from "chose not to measure"
+    /// (configuration intent).
+    SkippedDisabled,
     /// Tool ran but exited non-zero or produced unparseable output.
     Failed,
     /// Tool exceeded the configured timeout.
@@ -91,6 +96,22 @@ impl AuditorResult {
                 "binary not found and --install-missing is false; install manually to enable"
                     .to_string(),
             ),
+        }
+    }
+
+    /// Synthesize a Skipped result for an auditor disabled in
+    /// `.holocronrc.toml`. The runner never sees these — the CLI
+    /// injects them into the [`RunOutcome`] alongside the real results
+    /// so the grader treats the category as Skipped.
+    #[must_use]
+    pub fn skipped_disabled(meta: AuditorMeta) -> Self {
+        Self {
+            auditor: meta.name,
+            category: meta.category,
+            status: RunStatus::SkippedDisabled,
+            findings: vec![],
+            duration: Duration::ZERO,
+            error: Some("disabled in .holocronrc.toml [auditors]".to_string()),
         }
     }
 }

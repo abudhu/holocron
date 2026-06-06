@@ -106,6 +106,7 @@ fn write_auditor_status(report: &Report<'_>, out: &mut String) {
             RunStatus::Failed => "✗ failed",
             RunStatus::TimedOut => "⌛ timed out",
             RunStatus::SkippedMissing => "⊘ skipped (not installed)",
+            RunStatus::SkippedDisabled => "⊘ skipped (disabled in rc)",
         };
         let _ = writeln!(
             out,
@@ -124,7 +125,11 @@ fn write_auditor_status(report: &Report<'_>, out: &mut String) {
         .auditor_results
         .iter()
         .filter(|r| {
-            r.error.is_some() && !matches!(r.status, RunStatus::Ok | RunStatus::SkippedMissing)
+            r.error.is_some()
+                && !matches!(
+                    r.status,
+                    RunStatus::Ok | RunStatus::SkippedMissing | RunStatus::SkippedDisabled
+                )
         })
         .collect();
     if !failures.is_empty() {
