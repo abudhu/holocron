@@ -33,9 +33,10 @@ fn write_allowlisted_section(report: &Report<'_>, out: &mut String) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "These findings matched an `[[allowlist]]` rule in `.holocronrc.toml` \
-         and were excluded from the category scores and overall grade. They \
-         are listed here for audit-trail purposes."
+        "These findings matched either an `[[allowlist]]` rule in \
+         `.holocronrc.toml` or an inline `// holocron: ignore <code>` \
+         annotation in source, and were excluded from the category \
+         scores and overall grade. Listed here for audit-trail purposes."
     );
     let _ = writeln!(out);
     for f in allow {

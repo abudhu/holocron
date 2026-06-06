@@ -13,6 +13,7 @@ pub mod auditor;
 pub mod config;
 pub mod finding;
 pub mod grade;
+pub mod inline_ignore;
 pub mod runner;
 
 pub use auditor::{Auditor, AuditorMeta, AuditorResult, RunStatus};
@@ -22,6 +23,7 @@ pub use config::{
 };
 pub use finding::{Category, Finding, Location, Severity};
 pub use grade::{CategoryScore, Grade, GradeReport, Letter};
+pub use inline_ignore::apply_inline_annotations;
 pub use runner::{AuditorEvent, ProgressSink, RunOutcome, Runner};
 
 /// Crate version, exposed for report headers and the CLI's `--version`.

@@ -111,6 +111,7 @@ impl std::str::FromStr for Letter {
     /// minus sign `−` (which is what [`Display`] emits) so users can
     /// round-trip `--fail-below "$(holocron audit --print-grade)"` without
     /// shell-escaping worries.
+    // holocron: ignore complexity-warn -- 13-arm dispatch table by design (one arm per grade letter A+ through F). Splitting adds indirection without reducing essential complexity.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Normalize: trim, collapse the Unicode minus to ASCII '-', uppercase.
         let normalized = s.trim().replace('\u{2212}', "-").to_ascii_uppercase();

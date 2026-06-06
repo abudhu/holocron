@@ -297,7 +297,7 @@ fn write_allowlisted_section(report: &Report<'_>, out: &mut String) {
         "<summary><h2>Allowlisted Findings <span class=\"count\">({})</span></h2></summary>",
         allow.len()
     );
-    let _ = writeln!(out, "<p class=\"note\">These findings matched an <code>[[allowlist]]</code> rule in <code>.holocronrc.toml</code> and were excluded from the category scores and overall grade. They are listed here for audit-trail purposes.</p>");
+    let _ = writeln!(out, "<p class=\"note\">These findings matched either an <code>[[allowlist]]</code> rule in <code>.holocronrc.toml</code> or an inline <code>// holocron: ignore &lt;code&gt;</code> annotation in source, and were excluded from the category scores and overall grade. Listed here for audit-trail purposes.</p>");
     let _ = writeln!(out, "<ul class=\"findings\">");
     for f in allow {
         let _ = writeln!(out, "<li class=\"finding allowlisted\">");

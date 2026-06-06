@@ -504,17 +504,13 @@ async fn audit(args: AuditArgs, diff_filter: Option<DiffContext>) -> Result<Exit
     // #29: apply [[allowlist]] rules before grading. Allowlisted
     // findings still appear in the report but are excluded from the
     // grade math. Mutate each AuditorResult.findings in place.
-    let allowlisted_count: usize = outcome
-        .auditor_results
-        .iter_mut()
-        .map(|r| holocron_core::apply_allowlist(&mut r.findings, &rc.allowlist))
-        .sum();
-    if allowlisted_count > 0 {
-        println!(
-            "Allowlist: {allowlisted_count} finding{} suppressed from grade",
-            if allowlisted_count == 1 { "" } else { "s" }
-        );
-    }
+    apply_rc_allowlist_step(&mut outcome, &rc);
+
+    // #42: apply inline `// holocron: ignore <code>` annotations.
+    // Runs AFTER rc allowlist so rc rules win on overlap (first-match-
+    // wins). Sets the same allowlisted flag, so the renderer treats
+    // inline-suppressed findings exactly like rc-suppressed ones.
+    apply_inline_annotation_step(&mut outcome, &target);
 
     // #41: `holocron diff` mode — filter findings to only those touching
     // changed files. Happens AFTER allowlist (so allowlisted-and-still-
@@ -619,6 +615,44 @@ fn build_runner(
         runner = runner.with_auditor(a);
     }
     runner
+}
+
+/// Apply the rc `[[allowlist]]` rules to the outcome and print the
+/// banner if any findings were suppressed. Extracted from `audit()`
+/// to keep its cyclomatic complexity below threshold.
+fn apply_rc_allowlist_step(
+    outcome: &mut holocron_core::RunOutcome,
+    rc: &holocron_core::HolocronConfig,
+) {
+    let count: usize = outcome
+        .auditor_results
+        .iter_mut()
+        .map(|r| holocron_core::apply_allowlist(&mut r.findings, &rc.allowlist))
+        .sum();
+    if count > 0 {
+        println!(
+            "Allowlist: {count} finding{} suppressed from grade",
+            if count == 1 { "" } else { "s" }
+        );
+    }
+}
+
+/// Apply inline `// holocron: ignore <code>` annotations to the
+/// outcome and print the banner. Extracted from `audit()` to keep
+/// its cyclomatic complexity below threshold (#42).
+fn apply_inline_annotation_step(outcome: &mut holocron_core::RunOutcome, target: &Path) {
+    let count: usize = outcome
+        .auditor_results
+        .iter_mut()
+        .map(|r| holocron_core::apply_inline_annotations(&mut r.findings, target))
+        .sum();
+    if count > 0 {
+        println!(
+            "Inline annotations: {count} finding{} suppressed via \
+             `// holocron: ignore` comments",
+            if count == 1 { "" } else { "s" }
+        );
+    }
 }
 
 /// Apply the `holocron diff <base-ref>` post-filter to an audit

@@ -23,8 +23,6 @@
 [auditors]
 cargo-geiger = false
 
-[[allowlist]]
-auditor = "rust-code-analysis"
-code = "complexity-warn"
-path = "crates/holocron-core/src/grade.rs"
-reason = "Letter::from_str is a 13-arm dispatch table by design (one arm per grade letter A+ through F). Splitting it adds indirection without reducing the essential complexity of the mapping."
+# Letter::from_str complexity is now suppressed inline at the source
+# (#42), see crates/holocron-core/src/grade.rs immediately above the
+# function definition. No more allowlist entries needed here.
