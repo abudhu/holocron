@@ -357,4 +357,123 @@ mod tests {
         assert!(Letter::from_str("").is_err());
         assert!(Letter::from_str("E").is_err());
     }
+
+    // --- Issue #24: failed auditors must surface as Skipped, not 0.85 ---
+
+    fn failed_result(category: Category, name: &'static str, msg: &str) -> AuditorResult {
+        AuditorResult::failed(AuditorMeta { name, category }, msg, Duration::from_millis(10))
+    }
+
+    #[test]
+    fn failed_auditor_surfaces_as_skipped_not_graded_b() {
+        // cargo-audit failed (e.g. network blip fetching advisory-db).
+        // The Security category should be Skipped, NOT graded 0.85.
+        let results =
+            vec![failed_result(Category::Security, "cargo-audit", "advisory db fetch failed")];
+        let report = Grade::new(&results).compute();
+
+        let sec = report
+            .by_category
+            .iter()
+            .find(|c| c.category() == Category::Security)
+            .expect("Security should appear in by_category");
+        match sec {
+            CategoryScore::Skipped { reason, .. } => {
+                assert!(
+                    reason.contains("fetch failed") || reason.to_lowercase().contains("failed"),
+                    "skip reason should describe what failed, got: {reason}"
+                );
+            }
+            CategoryScore::Graded { score, letter, .. } => {
+                panic!(
+                    "expected Skipped for failed auditor, got Graded score={score} letter={letter:?} (this is the #24 bug)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overall_grade_renormalizes_when_a_category_is_skipped() {
+        // Security (weight 0.30) is skipped; remaining 0.70 weight is
+        // split across 4 clean categories. A clean codebase should still
+        // come out at 1.0, not be penalized for a tooling outage.
+        let results = vec![
+            failed_result(Category::Security, "cargo-audit", "outage"),
+            AuditorResult::ok(
+                AuditorMeta { name: "clippy", category: Category::Lints },
+                vec![],
+                Duration::from_millis(1),
+            ),
+            AuditorResult::ok(
+                AuditorMeta { name: "rust-code-analysis", category: Category::Complexity },
+                vec![],
+                Duration::from_millis(1),
+            ),
+            AuditorResult::ok(
+                AuditorMeta { name: "cargo-machete", category: Category::DeadCode },
+                vec![],
+                Duration::from_millis(1),
+            ),
+            AuditorResult::ok(
+                AuditorMeta { name: "cargo-deny", category: Category::Maintenance },
+                vec![],
+                Duration::from_millis(1),
+            ),
+        ];
+        let report = Grade::new(&results).compute();
+        assert!(
+            (report.overall_score - 1.0).abs() < 1e-9,
+            "expected overall 1.0 (skipped category drops out of weighted average), got {}",
+            report.overall_score
+        );
+        assert_eq!(report.overall_letter, Letter::APlus);
+    }
+
+    #[test]
+    fn report_exposes_any_skipped_for_cli_exit_decisions() {
+        let results = vec![failed_result(Category::Security, "cargo-audit", "outage")];
+        let report = Grade::new(&results).compute();
+        assert!(
+            report.any_skipped(),
+            "GradeReport::any_skipped() must return true when a category is Skipped"
+        );
+
+        // Negative case: no failures → no skipped categories.
+        let clean = Grade::new(&[auditor_result_with(Category::Lints, vec![])]).compute();
+        assert!(!clean.any_skipped(), "clean run must not report any skipped");
+    }
+
+    #[test]
+    fn timed_out_auditor_also_surfaces_as_skipped() {
+        // Same contract as Failed — a timeout means "we have no signal",
+        // not "code quality is 0.85".
+        let timeout_result = AuditorResult::timed_out(
+            AuditorMeta { name: "rust-code-analysis", category: Category::Complexity },
+            Duration::from_secs(300),
+        );
+        let report = Grade::new(&[timeout_result]).compute();
+        let complexity =
+            report.by_category.iter().find(|c| c.category() == Category::Complexity).unwrap();
+        assert!(
+            matches!(complexity, CategoryScore::Skipped { .. }),
+            "timed-out auditor should produce Skipped, not Graded"
+        );
+    }
+
+    #[test]
+    fn skipped_missing_auditor_also_surfaces_as_skipped() {
+        // The binary isn't on PATH and --install-missing is false.
+        // Same contract: report it explicitly, don't grade-by-fallback.
+        let skipped = AuditorResult::skipped_missing(AuditorMeta {
+            name: "cargo-deny",
+            category: Category::Maintenance,
+        });
+        let report = Grade::new(&[skipped]).compute();
+        let maint =
+            report.by_category.iter().find(|c| c.category() == Category::Maintenance).unwrap();
+        assert!(
+            matches!(maint, CategoryScore::Skipped { .. }),
+            "SkippedMissing auditor should produce Skipped category"
+        );
+    }
 }
