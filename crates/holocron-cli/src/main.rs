@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 use tracing::info;
 
+mod diff;
 mod progress;
 use progress::ProgressMode;
 
@@ -25,6 +26,22 @@ struct Cli {
 enum Command {
     /// Audit a Rust project and emit a graded report.
     Audit(AuditArgs),
+    /// Audit a Rust project but score only the findings touching files
+    /// changed since `<base-ref>`. Equivalent to `holocron audit
+    /// <path>` plus a post-filter that drops findings outside the
+    /// diff, then regrades.
+    ///
+    /// Useful for pre-commit hooks, PR review fast-paths, and "what
+    /// did this branch break." Project-wide findings (cargo-audit
+    /// advisories, cargo-deny supply-chain hits) have no file location
+    /// and are dropped in diff mode — a banner surfaces the count so
+    /// you know to run a full audit for those.
+    ///
+    /// Examples:
+    ///   holocron diff main                  (vs main branch tip)
+    ///   holocron diff HEAD~5                (vs 5 commits ago)
+    ///   holocron diff origin/main --path .  (PR-style diff)
+    Diff(DiffArgs),
     /// Generate a starter `.holocronrc.toml` in the target directory.
     ///
     /// The file contains commented-out defaults you can opt into to tune
@@ -40,6 +57,19 @@ enum Command {
     /// context (auditor, severity, location, rendered diagnostic) plus
     /// a pre-formatted "ask the LLM to fix this" prompt template.
     Explain(ExplainArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DiffArgs {
+    /// Git ref to diff against (SHA, branch name, tag, or `HEAD~N`).
+    /// Required positional. Use `HEAD~1` for "since the last commit",
+    /// `main` for "since branching from main", etc.
+    base: String,
+
+    /// All other flags are shared with `audit`. See `holocron audit --help`
+    /// for the full list.
+    #[command(flatten)]
+    audit: AuditArgs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -144,7 +174,14 @@ async fn main() -> ExitCode {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Audit(args) => match audit(args).await {
+        Command::Audit(args) => match audit(args, None).await {
+            Ok(exit) => exit,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(2)
+            }
+        },
+        Command::Diff(args) => match diff_cmd(args).await {
             Ok(exit) => exit,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -371,11 +408,46 @@ struct RcResolution {
     thresholds: ComplexityThresholds,
 }
 
-async fn audit(args: AuditArgs) -> Result<ExitCode> {
+/// Context passed from `diff_cmd()` into `audit()` so the audit
+/// pipeline knows to filter findings to a changed-file set before
+/// grading. The header banner and the filter step both consume it.
+struct DiffContext {
+    base_ref: String,
+    changed_files: std::collections::HashSet<PathBuf>,
+}
+
+async fn diff_cmd(args: DiffArgs) -> Result<ExitCode> {
+    let target = resolve_target(&args.audit.path)
+        .with_context(|| format!("resolving target {}", args.audit.path.display()))?;
+    let changed_files = diff::changed_files_since(&target, &args.base)
+        .with_context(|| format!("listing files changed since `{}`", args.base))?;
+    if changed_files.is_empty() {
+        eprintln!(
+            "No files changed since `{}` in {} — nothing to diff against.",
+            args.base,
+            target.display()
+        );
+        // Exit clean: nothing to gate, nothing to grade.
+        return Ok(ExitCode::SUCCESS);
+    }
+    let ctx = DiffContext { base_ref: args.base, changed_files };
+    audit(args.audit, Some(ctx)).await
+}
+
+async fn audit(args: AuditArgs, diff_filter: Option<DiffContext>) -> Result<ExitCode> {
     let target = resolve_target(&args.path)
         .with_context(|| format!("resolving target {}", args.path.display()))?;
     info!(target = %target.display(), "starting audit");
-    println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
+    if let Some(ctx) = &diff_filter {
+        println!(
+            "Holocron {} — auditing {} (diff vs {})",
+            holocron_core::VERSION,
+            target.display(),
+            ctx.base_ref,
+        );
+    } else {
+        println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
+    }
 
     let RcResolution { rc, rc_path, effective_fail_below, thresholds } =
         load_rc_and_merge(&target, args.fail_below)?;
@@ -434,6 +506,14 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
             "Allowlist: {allowlisted_count} finding{} suppressed from grade",
             if allowlisted_count == 1 { "" } else { "s" }
         );
+    }
+
+    // #41: `holocron diff` mode — filter findings to only those touching
+    // changed files. Happens AFTER allowlist (so allowlisted-and-still-
+    // present findings stay tagged) and BEFORE grade (so the grade
+    // reflects "this diff's score" — the whole point of diff mode).
+    if let Some(ctx) = &diff_filter {
+        apply_diff_filter(&mut outcome, &target, ctx);
     }
 
     let grade = Grade::new(&outcome.auditor_results).with_weights(weights).compute();
@@ -531,6 +611,42 @@ fn build_runner(
         runner = runner.with_auditor(a);
     }
     runner
+}
+
+/// Apply the `holocron diff <base-ref>` post-filter to an audit
+/// outcome. Mutates each `AuditorResult.findings` in place, dropping
+/// findings outside the changed-file set, then prints a summary banner.
+/// Extracted from `audit()` to keep its cyclomatic complexity below
+/// threshold (#41).
+fn apply_diff_filter(outcome: &mut holocron_core::RunOutcome, target: &Path, ctx: &DiffContext) {
+    let total_filtered: diff::DiffFilterStats = outcome
+        .auditor_results
+        .iter_mut()
+        .map(|r| diff::filter_findings_for_diff(&mut r.findings, target, &ctx.changed_files))
+        .fold(
+            diff::DiffFilterStats { kept: 0, dropped_out_of_scope: 0, dropped_project_wide: 0 },
+            |acc, s| diff::DiffFilterStats {
+                kept: acc.kept + s.kept,
+                dropped_out_of_scope: acc.dropped_out_of_scope + s.dropped_out_of_scope,
+                dropped_project_wide: acc.dropped_project_wide + s.dropped_project_wide,
+            },
+        );
+    println!(
+        "Diff filter: {} changed file{} → kept {} finding{}, dropped {} out-of-scope, \
+         dropped {} project-wide",
+        ctx.changed_files.len(),
+        if ctx.changed_files.len() == 1 { "" } else { "s" },
+        total_filtered.kept,
+        if total_filtered.kept == 1 { "" } else { "s" },
+        total_filtered.dropped_out_of_scope,
+        total_filtered.dropped_project_wide,
+    );
+    if total_filtered.dropped_project_wide > 0 {
+        println!(
+            "  (project-wide findings like cargo-audit advisories aren't tied to a \
+             specific file; run `holocron audit` for those)"
+        );
+    }
 }
 
 /// Merge rc-provided complexity thresholds onto the built-in defaults.
