@@ -98,15 +98,24 @@ jobs:
 
         # Resilient cargo-install: retry on the transient "http2: client
         # connection lost" error we see when crates.io has a network blip.
+        #
+        # NOTE: install_one takes a single string of args (instead of using
+        # bash positional forwarding) because OneDev's buildspec parser
+        # treats the at-sign as variable interpolation delimiter and rejects
+        # an unpaired bare one ("Last appearance of ... is a surprise to me").
+        # Escaping by doubling works but is ugly to maintain, so we sidestep
+        # the issue by avoiding bash positional-array expansion entirely.
         install_one() {
-          local name="$1"; shift
+          local name="$1"
+          local args="$2"
           if command -v "$name" >/dev/null 2>&1; then
-            echo "=== $name already installed: $(command -v $name) ==="
+            echo "=== $name already installed: $(command -v "$name") ==="
             return 0
           fi
           for attempt in 1 2 3; do
             echo "=== installing $name (attempt $attempt) ==="
-            if cargo install "$@" --locked; then
+            # Intentionally unquoted to allow word-splitting of $args.
+            if cargo install $args --locked; then
               return 0
             fi
             echo "=== attempt $attempt failed, sleeping 10s ==="
@@ -116,11 +125,11 @@ jobs:
           return 1
         }
 
-        install_one cargo-audit cargo-audit
-        install_one cargo-machete cargo-machete
-        install_one cargo-deny cargo-deny
-        install_one cargo-outdated cargo-outdated
-        install_one rust-code-analysis-cli --git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli
+        install_one cargo-audit "cargo-audit"
+        install_one cargo-machete "cargo-machete"
+        install_one cargo-deny "cargo-deny"
+        install_one cargo-outdated "cargo-outdated"
+        install_one rust-code-analysis-cli "--git https://github.com/mozilla/rust-code-analysis rust-code-analysis-cli"
 
         echo "=== installed binaries ==="
         ls -la "$CARGO_HOME/bin"
