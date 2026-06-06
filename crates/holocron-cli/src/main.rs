@@ -22,6 +22,27 @@ struct Cli {
 enum Command {
     /// Audit a Rust project and emit a graded report.
     Audit(AuditArgs),
+    /// Generate a starter `.holocronrc.toml` in the target directory.
+    ///
+    /// The file contains commented-out defaults you can opt into to tune
+    /// the audit (per-auditor severity overrides, per-finding allowlists,
+    /// complexity thresholds, the `--fail-below` gate threshold). Holocron
+    /// runs fine with no config file — this is purely for projects that
+    /// want to commit their tuning into the repo.
+    Init(InitArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct InitArgs {
+    /// Directory to write `.holocronrc.toml` into. Defaults to the
+    /// current directory.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    /// Overwrite an existing `.holocronrc.toml` without prompting.
+    /// Without this flag, `holocron init` refuses to clobber.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -79,7 +100,43 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Command::Init(args) => match init(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(2)
+            }
+        },
     }
+}
+
+/// Default `.holocronrc.toml` shipped by `holocron init`. Heavily
+/// commented so users learn what's configurable without reading the
+/// source. Holocron's runtime currently ignores most of these — they
+/// describe the *intended* config surface so users can pre-stage their
+/// preferences. Wire-in happens in follow-up issues.
+const DEFAULT_HOLOCRONRC: &str = include_str!("../templates/holocronrc-default.toml");
+
+fn init(args: &InitArgs) -> Result<()> {
+    let dir = if args.path.is_absolute() {
+        args.path.clone()
+    } else {
+        std::env::current_dir()?.join(&args.path)
+    };
+    anyhow::ensure!(dir.is_dir(), "{} is not a directory", dir.display());
+
+    let dest = dir.join(".holocronrc.toml");
+    if dest.exists() && !args.force {
+        anyhow::bail!("{} already exists — pass --force to overwrite", dest.display());
+    }
+    std::fs::write(&dest, DEFAULT_HOLOCRONRC)
+        .with_context(|| format!("writing {}", dest.display()))?;
+    println!("Wrote {}", dest.display());
+    println!();
+    println!("This file is currently advisory — Holocron's runtime doesn't read");
+    println!("it yet. The schema is committed so you can pre-stage your tuning");
+    println!("now and it'll take effect when later issues land.");
+    Ok(())
 }
 
 async fn audit(args: AuditArgs) -> Result<ExitCode> {
@@ -398,5 +455,61 @@ mod tests {
         assert!(clean.contains('0'));
         assert!(gate.contains('1'));
         assert!(outage.contains('3'));
+    }
+
+    // --- holocron init (#15) ---
+
+    #[test]
+    fn init_writes_starter_holocronrc_into_empty_dir() {
+        let d = TempDir::new().unwrap();
+        let args = InitArgs { path: d.path().to_path_buf(), force: false };
+        init(&args).unwrap();
+        let path = d.path().join(".holocronrc.toml");
+        assert!(path.is_file());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# .holocronrc.toml"));
+        assert!(body.contains("[gate]"));
+        assert!(body.contains("fail_below"));
+    }
+
+    #[test]
+    fn init_refuses_to_clobber_without_force() {
+        let d = TempDir::new().unwrap();
+        let path = d.path().join(".holocronrc.toml");
+        std::fs::write(&path, "# existing user config\n").unwrap();
+        let args = InitArgs { path: d.path().to_path_buf(), force: false };
+        let err = init(&args).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "got: {err}");
+        // Body unchanged.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# existing user config\n");
+    }
+
+    #[test]
+    fn init_force_overwrites_existing_file() {
+        let d = TempDir::new().unwrap();
+        let path = d.path().join(".holocronrc.toml");
+        std::fs::write(&path, "# stale\n").unwrap();
+        let args = InitArgs { path: d.path().to_path_buf(), force: true };
+        init(&args).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[gate]"), "expected fresh template, got: {body}");
+    }
+
+    #[test]
+    fn init_errors_on_nonexistent_dir() {
+        let args = InitArgs {
+            path: PathBuf::from("/this/path/does/not/exist/and/should/not/be/created"),
+            force: false,
+        };
+        let err = init(&args).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "got: {err}");
+    }
+
+    #[test]
+    fn shipped_template_is_valid_toml() {
+        // The included template ships in every binary. If the TOML
+        // doesn't parse, every `holocron init` produces a broken file.
+        let _: toml::Value =
+            toml::from_str(DEFAULT_HOLOCRONRC).expect("DEFAULT_HOLOCRONRC must be valid TOML");
     }
 }
