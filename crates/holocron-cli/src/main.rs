@@ -324,32 +324,38 @@ fn render_location(loc: &serde_json::Value) -> String {
     }
 }
 
+/// Load and merge rc-driven settings. Returns the rc itself, the
+/// effective `--fail-below` (flag wins over rc), and the
+/// `ComplexityThresholds` to use for the audit. Extracted from
+/// `audit()` to keep its cyclomatic complexity below threshold.
+fn load_rc_and_merge(target: &Path, flag_fail_below: Option<Letter>) -> Result<RcResolution> {
+    let (rc, rc_path) =
+        holocron_core::HolocronConfig::load_from(target).context("loading .holocronrc.toml")?;
+    let effective_fail_below = match flag_fail_below {
+        Some(letter) => Some(letter),
+        None => rc.gate.fail_below_letter().ok().flatten(),
+    };
+    let thresholds = merge_complexity_thresholds(&rc.complexity);
+    Ok(RcResolution { rc_path, effective_fail_below, thresholds })
+}
+
+struct RcResolution {
+    rc_path: Option<PathBuf>,
+    effective_fail_below: Option<Letter>,
+    thresholds: ComplexityThresholds,
+}
+
 async fn audit(args: AuditArgs) -> Result<ExitCode> {
     let target = resolve_target(&args.path)
         .with_context(|| format!("resolving target {}", args.path.display()))?;
     info!(target = %target.display(), "starting audit");
     println!("Holocron {} — auditing {}", holocron_core::VERSION, target.display());
 
-    // Load .holocronrc.toml if present (walks up from target). Errors
-    // are fast-fail (exit 2 via the error path) so users see broken
-    // config before audit spends 30s warming up.
-    let (rc, rc_path) =
-        holocron_core::HolocronConfig::load_from(&target).context("loading .holocronrc.toml")?;
+    let RcResolution { rc_path, effective_fail_below, thresholds } =
+        load_rc_and_merge(&target, args.fail_below)?;
     if let Some(p) = &rc_path {
         println!("Config: {}", p.display());
     }
-
-    // Merge: explicit --fail-below wins. Otherwise fall back to rc.
-    // (The rc loader has already parsed + validated the letter; this
-    // call is infallible because of that.)
-    let effective_fail_below = match args.fail_below {
-        Some(letter) => Some(letter),
-        None => rc.gate.fail_below_letter().ok().flatten(),
-    };
-
-    // Derive ComplexityThresholds from rc. Missing keys keep the
-    // built-in defaults; #31 acceptance.
-    let thresholds = merge_complexity_thresholds(&rc.complexity);
 
     let outcome =
         build_runner(&target, &args, thresholds).run().await.context("running auditors")?;
@@ -358,46 +364,46 @@ async fn audit(args: AuditArgs) -> Result<ExitCode> {
 
     let written = write_reports(&report, &target, &args)?;
     print_summary(&grade, &written);
+    emit_exit_banner(&grade, effective_fail_below);
 
-    // Decide exit code + emit the right user-facing banner.
-    //
-    // Precedence:
-    //   1 = gate failed (--fail-below; quality regression)
-    //   3 = auditor outage (one or more categories couldn't be measured)
-    //   0 = clean / gate passed
-    // Gate failure wins over outage so a regression isn't masked when
-    // BOTH happened.
     let exit_kind = decide_exit(&grade, effective_fail_below);
+    Ok(exit_kind.into())
+}
+
+/// Emit the user-facing banner that explains the exit code about to
+/// be returned. Extracted from `audit()` to keep its complexity below
+/// threshold. The actual exit kind decision lives in `decide_exit`.
+fn emit_exit_banner(grade: &holocron_core::GradeReport, effective_fail_below: Option<Letter>) {
+    let exit_kind = decide_exit(grade, effective_fail_below);
     match exit_kind {
         ExitKind::GateFailed(threshold) => eprintln!(
             "\nGATE FAILED: grade {} is below threshold {}",
             grade.overall_letter, threshold
         ),
-        ExitKind::AuditorOutage => {
-            let skipped: Vec<String> = grade
-                .by_category
-                .iter()
-                .filter_map(|cs| match cs {
-                    CategoryScore::Skipped { category, reason } => {
-                        Some(format!("  {category}: {reason}"))
-                    }
-                    CategoryScore::Graded { .. } => None,
-                })
-                .collect();
-            eprintln!(
-                "\nAUDITOR OUTAGE: {} categor{} skipped — overall grade is advisory.\n{}",
-                skipped.len(),
-                if skipped.len() == 1 { "y was" } else { "ies were" },
-                skipped.join("\n"),
-            );
-        }
+        ExitKind::AuditorOutage => emit_outage_banner(grade),
         ExitKind::Clean => {
             if let Some(threshold) = effective_fail_below {
                 println!("Gate passed: {} ≥ {}", grade.overall_letter, threshold);
             }
         }
     }
-    Ok(exit_kind.into())
+}
+
+fn emit_outage_banner(grade: &holocron_core::GradeReport) {
+    let skipped: Vec<String> = grade
+        .by_category
+        .iter()
+        .filter_map(|cs| match cs {
+            CategoryScore::Skipped { category, reason } => Some(format!("  {category}: {reason}")),
+            CategoryScore::Graded { .. } => None,
+        })
+        .collect();
+    eprintln!(
+        "\nAUDITOR OUTAGE: {} categor{} skipped — overall grade is advisory.\n{}",
+        skipped.len(),
+        if skipped.len() == 1 { "y was" } else { "ies were" },
+        skipped.join("\n"),
+    );
 }
 
 /// Distinct exit signals from `holocron audit`.
@@ -467,38 +473,50 @@ fn merge_complexity_thresholds(rc: &holocron_core::ComplexityConfig) -> Complexi
 /// Render the Markdown report (always), JSON sidecar (unless `--no-json`),
 /// and SARIF sidecar (if `--sarif`). Returns the paths written.
 fn write_reports(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<WrittenPaths> {
-    let md_path = args.output.clone().unwrap_or_else(|| default_report_path(target, "md"));
-    let md = render_markdown(report);
-    std::fs::write(&md_path, &md)
-        .with_context(|| format!("writing markdown report to {}", md_path.display()))?;
+    let md = write_markdown(report, target, args)?;
+    let json = write_json(report, target, args)?;
+    let sarif = write_sarif_sidecar(report, target, args)?;
+    Ok(WrittenPaths { md, json, sarif })
+}
 
-    let json_path = if args.no_json {
-        None
-    } else {
-        let p = args
-            .output
-            .as_ref()
-            .map_or_else(|| default_report_path(target, "json"), |o| o.with_extension("json"));
-        let json = render_json(report).context("serializing JSON sidecar")?;
-        std::fs::write(&p, json)
-            .with_context(|| format!("writing JSON sidecar to {}", p.display()))?;
-        Some(p)
-    };
+fn write_markdown(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<PathBuf> {
+    let path = args.output.clone().unwrap_or_else(|| default_report_path(target, "md"));
+    let body = render_markdown(report);
+    std::fs::write(&path, &body)
+        .with_context(|| format!("writing markdown report to {}", path.display()))?;
+    Ok(path)
+}
 
-    let sarif_path = if args.sarif {
-        let p = args
-            .output
-            .as_ref()
-            .map_or_else(|| default_report_path(target, "sarif"), |o| o.with_extension("sarif"));
-        let sarif = render_sarif(report).context("serializing SARIF sidecar")?;
-        std::fs::write(&p, sarif)
-            .with_context(|| format!("writing SARIF sidecar to {}", p.display()))?;
-        Some(p)
-    } else {
-        None
-    };
+fn write_json(report: &Report<'_>, target: &Path, args: &AuditArgs) -> Result<Option<PathBuf>> {
+    if args.no_json {
+        return Ok(None);
+    }
+    let path = args
+        .output
+        .as_ref()
+        .map_or_else(|| default_report_path(target, "json"), |o| o.with_extension("json"));
+    let body = render_json(report).context("serializing JSON sidecar")?;
+    std::fs::write(&path, body)
+        .with_context(|| format!("writing JSON sidecar to {}", path.display()))?;
+    Ok(Some(path))
+}
 
-    Ok(WrittenPaths { md: md_path, json: json_path, sarif: sarif_path })
+fn write_sarif_sidecar(
+    report: &Report<'_>,
+    target: &Path,
+    args: &AuditArgs,
+) -> Result<Option<PathBuf>> {
+    if !args.sarif {
+        return Ok(None);
+    }
+    let path = args
+        .output
+        .as_ref()
+        .map_or_else(|| default_report_path(target, "sarif"), |o| o.with_extension("sarif"));
+    let body = render_sarif(report).context("serializing SARIF sidecar")?;
+    std::fs::write(&path, body)
+        .with_context(|| format!("writing SARIF sidecar to {}", path.display()))?;
+    Ok(Some(path))
 }
 
 struct WrittenPaths {

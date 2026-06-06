@@ -51,7 +51,11 @@ pub struct GateConfig {
 
 impl GateConfig {
     /// Parse the stored letter, if any. Returns `Ok(None)` when unset.
-    /// Errors when the letter is present but malformed.
+    ///
+    /// # Errors
+    /// Returns an error when `fail_below` is set but does not parse as a
+    /// valid letter grade. The error message names the bad input and
+    /// lists the valid options so the user can correct their rc file.
     pub fn fail_below_letter(&self) -> anyhow::Result<Option<Letter>> {
         self.fail_below.as_deref().map_or(Ok(None), |s| {
             Letter::from_str(s.trim()).map(Some).map_err(|e| {
@@ -90,6 +94,11 @@ pub struct ComplexityConfig {
 impl ComplexityConfig {
     /// Validate the rc values without applying them. Called by the CLI
     /// before audit so bad config fails fast with line context.
+    ///
+    /// # Errors
+    /// Returns an error if `cyclomatic_high <= cyclomatic_medium` or
+    /// either medium threshold is zero. Other invalid combinations
+    /// (negative numbers) can't occur because the types are `u32`.
     pub fn validate(&self) -> anyhow::Result<()> {
         if let (Some(m), Some(h)) = (self.cyclomatic_medium, self.cyclomatic_high) {
             anyhow::ensure!(
@@ -155,6 +164,13 @@ impl HolocronConfig {
     /// Also returns the resolved path the config was loaded from
     /// (`None` when defaults are used), so callers can quote it in
     /// error messages.
+    ///
+    /// # Errors
+    /// Returns an error if the rc file is present but unreadable
+    /// (permission, IO), unparseable as TOML (malformed syntax,
+    /// unknown fields), or contains an invalid `[gate].fail_below`
+    /// letter or out-of-range `[complexity]` threshold. Errors quote
+    /// the file path so users can find the bad line.
     pub fn load_from(start_dir: &Path) -> anyhow::Result<(Self, Option<PathBuf>)> {
         let Some(path) = find_rc(start_dir) else {
             return Ok((Self::default(), None));
